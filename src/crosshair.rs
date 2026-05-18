@@ -1,4 +1,6 @@
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D_POINT_2F};
+use core::f32::consts::FRAC_PI_4;
+use windows::Foundation::Numerics::Matrix3x2;
+use windows::Win32::Graphics::Direct2D::Common::{D2D_POINT_2F, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{D2D1_ELLIPSE, ID2D1DCRenderTarget, ID2D1SolidColorBrush};
 
 use crate::config::CrosshairType;
@@ -14,12 +16,42 @@ pub fn draw(
     dot_center: bool,
     border: bool,
     space_width: f32,
+    rotation: f32,
 ) {
+    let intrinsic = match ctype {
+        CrosshairType::Diamond => FRAC_PI_4,
+        _ => 0.0,
+    };
+    let total = rotation.to_radians() + intrinsic;
+
+    if total != 0.0 {
+        let (sa, ca) = total.sin_cos();
+        let m = Matrix3x2 {
+            M11: ca, M12: sa,
+            M21: -sa, M22: ca,
+            M31: cx - cx * ca + cy * sa,
+            M32: cy - cx * sa - cy * ca,
+        };
+        unsafe { target.SetTransform(&m as *const Matrix3x2); }
+    }
+
     match ctype {
         CrosshairType::Dot => draw_dot(target, brush, cx, cy, size),
-        CrosshairType::Cross => draw_cross(target, brush, cx, cy, size, thickness, dot_center, space_width),
+        CrosshairType::Cross | CrosshairType::Diamond => {
+            draw_cross(target, brush, cx, cy, size, thickness, dot_center, space_width)
+        }
         CrosshairType::T => draw_t(target, brush, cx, cy, size, thickness, dot_center, space_width),
         CrosshairType::Circle => draw_circle(target, brush, cx, cy, size, thickness, dot_center, border, space_width),
+        CrosshairType::Arrow => draw_arrow(target, brush, cx, cy, size, thickness, dot_center, space_width),
+    }
+
+    if total != 0.0 {
+        let identity = Matrix3x2 {
+            M11: 1.0, M12: 0.0,
+            M21: 0.0, M22: 1.0,
+            M31: 0.0, M32: 0.0,
+        };
+        unsafe { target.SetTransform(&identity as *const Matrix3x2); }
     }
 }
 
@@ -187,6 +219,95 @@ fn draw_circle(
                 brush,
             );
         } else {
+            let _ = target.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: D2D_POINT_2F { x: cx, y: cy },
+                    radiusX: 1.5,
+                    radiusY: 1.5,
+                },
+                brush,
+            );
+        }
+    }
+}
+
+fn draw_arrow(
+    target: &ID2D1DCRenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    cx: f32,
+    cy: f32,
+    size: f32,
+    thickness: f32,
+    dot_center: bool,
+    space_width: f32,
+) {
+    let half = size / 2.0;
+    let sw = space_width.min(half);
+    let arm = (half - sw) * 0.55;
+    let half_t = thickness / 2.0;
+
+    unsafe {
+        target.DrawLine(
+            D2D_POINT_2F { x: cx + sw, y: cy - half_t },
+            D2D_POINT_2F { x: cx + sw + arm, y: cy - arm },
+            brush,
+            thickness,
+            None,
+        );
+        target.DrawLine(
+            D2D_POINT_2F { x: cx + sw, y: cy + half_t },
+            D2D_POINT_2F { x: cx + sw + arm, y: cy + arm },
+            brush,
+            thickness,
+            None,
+        );
+
+        target.DrawLine(
+            D2D_POINT_2F { x: cx - sw, y: cy - half_t },
+            D2D_POINT_2F { x: cx - sw - arm, y: cy - arm },
+            brush,
+            thickness,
+            None,
+        );
+        target.DrawLine(
+            D2D_POINT_2F { x: cx - sw, y: cy + half_t },
+            D2D_POINT_2F { x: cx - sw - arm, y: cy + arm },
+            brush,
+            thickness,
+            None,
+        );
+
+        target.DrawLine(
+            D2D_POINT_2F { x: cx - half_t, y: cy - sw },
+            D2D_POINT_2F { x: cx - arm, y: cy - sw - arm },
+            brush,
+            thickness,
+            None,
+        );
+        target.DrawLine(
+            D2D_POINT_2F { x: cx + half_t, y: cy - sw },
+            D2D_POINT_2F { x: cx + arm, y: cy - sw - arm },
+            brush,
+            thickness,
+            None,
+        );
+
+        target.DrawLine(
+            D2D_POINT_2F { x: cx - half_t, y: cy + sw },
+            D2D_POINT_2F { x: cx - arm, y: cy + sw + arm },
+            brush,
+            thickness,
+            None,
+        );
+        target.DrawLine(
+            D2D_POINT_2F { x: cx + half_t, y: cy + sw },
+            D2D_POINT_2F { x: cx + arm, y: cy + sw + arm },
+            brush,
+            thickness,
+            None,
+        );
+
+        if dot_center {
             let _ = target.FillEllipse(
                 &D2D1_ELLIPSE {
                     point: D2D_POINT_2F { x: cx, y: cy },

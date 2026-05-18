@@ -20,18 +20,25 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT, SetProcessDpiAwarenessContext};
+use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, RegisterHotKey, UnregisterHotKey};
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use config::{Config, CrosshairType};
+use config::{Config, CrosshairType, Hotkey};
 
 const WM_TRAYICON: u32 = WM_APP + 1;
+const WM_HOTKEY_MSG: u32 = 0x0312;
+const WM_CLOSE_MSG: u32 = 0x0010;
+const HOTKEY_ID: i32 = 9001;
 
 const IDM_TOGGLE: u16 = 1001;
 const IDM_TYPE_DOT: u16 = 1002;
 const IDM_TYPE_CROSS: u16 = 1003;
 const IDM_TYPE_T: u16 = 1004;
 const IDM_TYPE_CIRCLE: u16 = 1006;
+const IDM_TYPE_DIAMOND: u16 = 1008;
+const IDM_TYPE_ARROW: u16 = 1009;
 const IDM_RELOAD_CONFIG: u16 = 1007;
 const IDM_EXIT: u16 = 1005;
 
@@ -96,7 +103,11 @@ impl WStr {
 
 fn main() -> Result<()> {
     unsafe {
-        let _ = SetProcessDPIAware();
+        #[allow(clippy::cast_possible_wrap)]
+        let ctx = DPI_AWARENESS_CONTEXT((-4isize) as *mut c_void);
+        if SetProcessDpiAwarenessContext(ctx).is_err() {
+            let _ = SetProcessDPIAware();
+        }
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok();
 
         let hmodule = GetModuleHandleW(None)?;
@@ -173,6 +184,15 @@ fn main() -> Result<()> {
 
         create_tray_icon(tray_hwnd, icon)?;
 
+        if let Some(hk) = Hotkey::from_parts(&cfg.primary_key, &cfg.secondary_key) {
+            let _ = RegisterHotKey(
+                tray_hwnd,
+                HOTKEY_ID,
+                HOT_KEY_MODIFIERS(hk.modifiers),
+                hk.vk as u32,
+            );
+        }
+
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).into() {
             TranslateMessage(&msg);
@@ -243,6 +263,8 @@ unsafe fn show_tray_menu(hwnd: HWND, app: &App) {
         AppendMenuW(hsub, MENU_ITEM_FLAGS(0), IDM_TYPE_CROSS as usize, WStr::new("Cross").as_pcwstr());
         AppendMenuW(hsub, MENU_ITEM_FLAGS(0), IDM_TYPE_T as usize, WStr::new("T").as_pcwstr());
         AppendMenuW(hsub, MENU_ITEM_FLAGS(0), IDM_TYPE_CIRCLE as usize, WStr::new("Circle").as_pcwstr());
+        AppendMenuW(hsub, MENU_ITEM_FLAGS(0), IDM_TYPE_DIAMOND as usize, WStr::new("Diamond").as_pcwstr());
+        AppendMenuW(hsub, MENU_ITEM_FLAGS(0), IDM_TYPE_ARROW as usize, WStr::new("Arrow").as_pcwstr());
     }
 
     match app.crosshair_type {
@@ -250,6 +272,8 @@ unsafe fn show_tray_menu(hwnd: HWND, app: &App) {
         CrosshairType::Cross => unsafe { CheckMenuItem(hsub, IDM_TYPE_CROSS as u32, MF_CHECKED.0) },
         CrosshairType::T => unsafe { CheckMenuItem(hsub, IDM_TYPE_T as u32, MF_CHECKED.0) },
         CrosshairType::Circle => unsafe { CheckMenuItem(hsub, IDM_TYPE_CIRCLE as u32, MF_CHECKED.0) },
+        CrosshairType::Diamond => unsafe { CheckMenuItem(hsub, IDM_TYPE_DIAMOND as u32, MF_CHECKED.0) },
+        CrosshairType::Arrow => unsafe { CheckMenuItem(hsub, IDM_TYPE_ARROW as u32, MF_CHECKED.0) },
     };
 
     let toggle_flags = MENU_ITEM_FLAGS(MF_STRING.0)
@@ -302,6 +326,25 @@ unsafe extern "system" fn tray_wndproc(
             }
             LRESULT(0)
         }
+        WM_HOTKEY_MSG => {
+            let app = app_mut(hwnd);
+            app.visible = !app.visible;
+            if app.visible {
+                app.config = Config::load();
+                app.crosshair_type = app.config.crosshair_type;
+                ShowWindow(app.overlay_hwnd, SW_SHOW);
+                SetWindowPos(
+                    app.overlay_hwnd,
+                    HWND_TOPMOST,
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                );
+                let _ = render(app);
+            } else {
+                ShowWindow(app.overlay_hwnd, SW_HIDE);
+            }
+            LRESULT(0)
+        }
         WM_COMMAND => {
             let app = app_mut(hwnd);
             let id = wparam.0 as u16;
@@ -325,27 +368,27 @@ unsafe extern "system" fn tray_wndproc(
                 }
                 IDM_TYPE_DOT => {
                     app.crosshair_type = CrosshairType::Dot;
-                    if app.visible {
-                        let _ = render(app);
-                    }
+                    if app.visible { let _ = render(app); }
                 }
                 IDM_TYPE_CROSS => {
                     app.crosshair_type = CrosshairType::Cross;
-                    if app.visible {
-                        let _ = render(app);
-                    }
+                    if app.visible { let _ = render(app); }
                 }
                 IDM_TYPE_T => {
                     app.crosshair_type = CrosshairType::T;
-                    if app.visible {
-                        let _ = render(app);
-                    }
+                    if app.visible { let _ = render(app); }
                 }
                 IDM_TYPE_CIRCLE => {
                     app.crosshair_type = CrosshairType::Circle;
-                    if app.visible {
-                        let _ = render(app);
-                    }
+                    if app.visible { let _ = render(app); }
+                }
+                IDM_TYPE_DIAMOND => {
+                    app.crosshair_type = CrosshairType::Diamond;
+                    if app.visible { let _ = render(app); }
+                }
+                IDM_TYPE_ARROW => {
+                    app.crosshair_type = CrosshairType::Arrow;
+                    if app.visible { let _ = render(app); }
                 }
                 IDM_RELOAD_CONFIG => {
                     app.config = Config::load();
@@ -356,6 +399,7 @@ unsafe extern "system" fn tray_wndproc(
                 }
                 IDM_EXIT => {
                     drop_tray_icon(hwnd);
+                    let _ = UnregisterHotKey(hwnd, HOTKEY_ID);
                     ShowWindow(app.overlay_hwnd, SW_HIDE);
                     if let Some(h) = app.custom_icon.take() {
                         DestroyIcon(h);
@@ -396,7 +440,15 @@ unsafe extern "system" fn overlay_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    unsafe {
+        if msg == WM_CLOSE_MSG {
+            let app = app_mut(hwnd);
+            app.visible = false;
+            ShowWindow(hwnd, SW_HIDE);
+            return LRESULT(0);
+        }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
 }
 
 // Keep the outer unsafe and wrap all unsafe calls in explicit unsafe blocks
@@ -454,12 +506,17 @@ unsafe fn render(app: &mut App) -> Result<()> { unsafe {
         None,
     )?;
 
+    let (mut dpi_x, mut dpi_y) = (96.0f32, 96.0f32);
+    app.factory.GetDesktopDpi(&mut dpi_x, &mut dpi_y);
+    let scale = dpi_x / 96.0;
     let cx = w as f32 / 2.0;
     let cy = h as f32 / 2.0;
     crosshair::draw(
         target, &brush, app.crosshair_type, cx, cy,
-        app.config.size, app.config.thickness, app.config.dot_center,
-        app.config.border, app.config.space_width,
+        app.config.size * scale, app.config.thickness * scale,
+        app.config.dot_center,
+        app.config.border, app.config.space_width * scale,
+        app.config.rotation,
     );
 
     rt.EndDraw(None, None)?;

@@ -1,3 +1,5 @@
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -6,6 +8,8 @@ pub enum CrosshairType {
     Cross,
     T,
     Circle,
+    Diamond,
+    Arrow,
 }
 
 impl CrosshairType {
@@ -14,6 +18,8 @@ impl CrosshairType {
             "dot" => Self::Dot,
             "t" => Self::T,
             "circle" => Self::Circle,
+            "diamond" => Self::Diamond,
+            "arrow" => Self::Arrow,
             _ => Self::Cross,
         }
     }
@@ -24,6 +30,97 @@ impl CrosshairType {
             Self::Cross => "cross",
             Self::T => "t",
             Self::Circle => "circle",
+            Self::Diamond => "diamond",
+            Self::Arrow => "arrow",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Hotkey {
+    pub modifiers: u32,
+    pub vk: u16,
+}
+
+impl Hotkey {
+    pub fn parse(s: &str) -> Option<Self> {
+        let parts: Vec<&str> = s.split('+').collect();
+        if parts.is_empty() || parts[0].trim().is_empty() {
+            return None;
+        }
+        let mut modifiers: u32 = 0;
+        for part in &parts[..parts.len() - 1] {
+            match part.trim().to_lowercase().as_str() {
+                "ctrl" | "control" => modifiers |= 0x0002,
+                "shift" => modifiers |= 0x0004,
+                "alt" => modifiers |= 0x0001,
+                "win" | "super" => modifiers |= 0x0008,
+                _ => return None,
+            }
+        }
+        let key_part = parts.last()?.trim();
+        let vk = Self::parse_key(key_part)?;
+        Some(Self { modifiers, vk })
+    }
+
+    pub fn from_parts(primary: &str, secondary: &str) -> Option<Self> {
+        let primary = primary.trim();
+        let secondary = secondary.trim();
+        if primary.is_empty() || secondary.is_empty() {
+            return None;
+        }
+        let mut modifiers: u32 = 0;
+        for part in primary.split('+') {
+            match part.trim().to_lowercase().as_str() {
+                "ctrl" | "control" => modifiers |= 0x0002,
+                "shift" => modifiers |= 0x0004,
+                "alt" => modifiers |= 0x0001,
+                "win" | "super" => modifiers |= 0x0008,
+                _ => return None,
+            }
+        }
+        let vk = Self::parse_key(secondary)?;
+        Some(Self { modifiers, vk })
+    }
+
+    fn parse_key(s: &str) -> Option<u16> {
+        match s.to_uppercase().as_str() {
+            k if k.len() == 1 && k.as_bytes()[0].is_ascii_alphabetic() => {
+                Some(k.as_bytes()[0] as u16)
+            }
+            k if k.len() == 1 && k.as_bytes()[0].is_ascii_digit() => {
+                Some(0x30 + (k.as_bytes()[0] - b'0') as u16)
+            }
+            k if k.starts_with('F') => {
+                let num: u16 = k[1..].parse().ok()?;
+                if (1..=24).contains(&num) { Some(0x70 + num - 1) } else { None }
+            }
+            " " | "SPACE" => Some(0x20),
+            "ENTER" | "RETURN" => Some(0x0D),
+            "TAB" => Some(0x09),
+            "ESC" | "ESCAPE" => Some(0x1B),
+            "BACK" | "BACKSPACE" => Some(0x08),
+            "DELETE" | "DEL" => Some(0x2E),
+            "INSERT" | "INS" => Some(0x2D),
+            "HOME" => Some(0x24),
+            "END" => Some(0x23),
+            "PAGEUP" | "PGUP" => Some(0x21),
+            "PAGEDOWN" | "PGDN" => Some(0x22),
+            "LEFT" => Some(0x25),
+            "RIGHT" => Some(0x27),
+            "UP" => Some(0x26),
+            "DOWN" => Some(0x28),
+            "\\" | "BACKSLASH" => Some(0xDC),
+            "-" | "MINUS" => Some(0xBD),
+            "=" | "EQUALS" | "PLUS" => Some(0xBB),
+            "[" | "LBRACKET" => Some(0xDB),
+            "]" | "RBRACKET" => Some(0xDD),
+            ";" | "SEMICOLON" => Some(0xBA),
+            "'" | "QUOTE" | "APOSTROPHE" => Some(0xDE),
+            "," | "COMMA" => Some(0xBC),
+            "." | "PERIOD" | "DOT" => Some(0xBE),
+            "/" | "SLASH" => Some(0xBF),
+            _ => None,
         }
     }
 }
@@ -38,6 +135,9 @@ pub struct Config {
     pub opacity: f32,
     pub border: bool,
     pub space_width: f32,
+    pub primary_key: String,
+    pub secondary_key: String,
+    pub rotation: f32,
 }
 
 impl Default for Config {
@@ -51,7 +151,21 @@ impl Default for Config {
             opacity: 0.85,
             border: true,
             space_width: 0.0,
+            primary_key: "CTRL".into(),
+            secondary_key: "\\".into(),
+            rotation: 0.0,
         }
+    }
+}
+
+pub fn log_warning(msg: &str) {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let log_path = exe_dir.join("ZeroIn.log");
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(log_path) {
+        let _ = writeln!(f, "{msg}");
     }
 }
 
@@ -65,7 +179,10 @@ impl Config {
         let config_path = exe_dir.join("config.ini");
         let content = match std::fs::read_to_string(&config_path) {
             Ok(c) => c,
-            Err(_) => return Self::default(),
+            Err(_) => {
+                log_warning("config.ini not found, using defaults");
+                return Self::default();
+            }
         };
 
         let mut config = Self::default();
@@ -77,40 +194,82 @@ impl Config {
                 continue;
             }
 
-            if line.starts_with('[') && line.ends_with(']') {
-                current_section = line[1..line.len() - 1].trim().to_lowercase();
+            if line.starts_with('[') {
+                let end = line.find(']').unwrap_or(line.len());
+                current_section = line[1..end].trim().to_lowercase();
                 continue;
             }
 
             if let Some(eq_pos) = line.find('=') {
                 let key = line[..eq_pos].trim().to_lowercase();
-                let value = line[eq_pos + 1..].trim();
+                let raw = line[eq_pos + 1..].trim();
+                let value = raw.split(';').next().unwrap_or(raw).trim();
 
                 if current_section == "crosshair" {
                     match key.as_str() {
                         "type" => config.crosshair_type = CrosshairType::from_str(value),
-                        "size" => config.size = value.parse::<f32>().unwrap_or(24.0).max(4.0),
-                        "thickness" => config.thickness = value.parse::<f32>().unwrap_or(2.0).max(1.0),
-                        "color" => config.color_hex = value.to_string(),
+                        "size" => {
+                            let v = value.parse::<f32>().unwrap_or(24.0);
+                            if v < 4.0 {
+                                log_warning(&format!("size {v} too small, clamped to 4"));
+                            }
+                            config.size = v.max(4.0);
+                        }
+                        "thickness" => {
+                            let v = value.parse::<f32>().unwrap_or(2.0);
+                            if v < 1.0 {
+                                log_warning(&format!("thickness {v} too small, clamped to 1"));
+                            }
+                            config.thickness = v.max(1.0);
+                        }
+                        "color" => {
+                            if !value.starts_with('#') || value.len() < 7 {
+                                log_warning(&format!("invalid color {value}, using default"));
+                            }
+                            config.color_hex = value.to_string();
+                        }
                         "dot_center" => {
                             config.dot_center = value.eq_ignore_ascii_case("true")
                                 || value == "1"
                         }
                         "opacity" => {
-                            config.opacity =
-                                value.parse::<f32>().unwrap_or(0.85).clamp(0.0, 1.0)
+                            let v = value.parse::<f32>().unwrap_or(0.85);
+                            if !(0.0..=1.0).contains(&v) {
+                                log_warning(&format!("opacity {v} out of range, clamped to 0..1"));
+                            }
+                            config.opacity = v.clamp(0.0, 1.0);
                         }
                         "border" => {
                             config.border = value.eq_ignore_ascii_case("true")
                                 || value == "1"
                         }
                         "space_width" => {
-                            config.space_width = value.parse::<f32>().unwrap_or(0.0).max(0.0)
+                            let v = value.parse::<f32>().unwrap_or(0.0).max(0.0);
+                            if v < 0.0 {
+                                log_warning("space_width negative, clamped to 0");
+                            }
+                            config.space_width = v;
+                        }
+                        "primary_key" => {
+                            config.primary_key = value.to_string();
+                        }
+                        "secondary_key" => {
+                            config.secondary_key = value.to_string();
+                        }
+                        "rotation" => {
+                            config.rotation = value.parse::<f32>().unwrap_or(0.0);
                         }
                         _ => {}
                     }
                 }
             }
+        }
+
+        if Hotkey::from_parts(&config.primary_key, &config.secondary_key).is_none() {
+            log_warning(&format!(
+                "invalid hotkey primary={} secondary={}",
+                config.primary_key, config.secondary_key
+            ));
         }
 
         config

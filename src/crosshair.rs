@@ -17,6 +17,7 @@ pub fn draw(
     border: bool,
     space_width: f32,
     rotation: f32,
+    dot_size: f32,
 ) {
     let intrinsic = match ctype {
         CrosshairType::Diamond => FRAC_PI_4,
@@ -38,11 +39,11 @@ pub fn draw(
     match ctype {
         CrosshairType::Dot => draw_dot(target, brush, cx, cy, size),
         CrosshairType::Cross | CrosshairType::Diamond => {
-            draw_cross(target, brush, cx, cy, size, thickness, dot_center, space_width)
+            draw_cross(target, brush, cx, cy, size, thickness, dot_center, space_width, dot_size)
         }
-        CrosshairType::T => draw_t(target, brush, cx, cy, size, thickness, dot_center, space_width),
-        CrosshairType::Circle => draw_circle(target, brush, cx, cy, size, thickness, dot_center, border, space_width),
-        CrosshairType::Arrow => draw_arrow(target, brush, cx, cy, size, thickness, dot_center, space_width),
+        CrosshairType::T => draw_t(target, brush, cx, cy, size, thickness, dot_center, space_width, dot_size),
+        CrosshairType::Circle => draw_circle(target, brush, cx, cy, size, thickness, dot_center, border, space_width, dot_size),
+        CrosshairType::Arrow => draw_arrow(target, brush, cx, cy, size, thickness, dot_center, space_width, dot_size),
     }
 
     if total != 0.0 {
@@ -102,6 +103,7 @@ fn draw_cross(
     thickness: f32,
     dot_center: bool,
     space_width: f32,
+    dot_size: f32,
 ) {
     let half = size / 2.0;
     let half_t = thickness / 2.0;
@@ -117,8 +119,8 @@ fn draw_cross(
             let _ = target.FillEllipse(
                 &D2D1_ELLIPSE {
                     point: D2D_POINT_2F { x: cx, y: cy },
-                    radiusX: 1.5,
-                    radiusY: 1.5,
+                    radiusX: dot_size,
+                    radiusY: dot_size,
                 },
                 brush,
             );
@@ -135,6 +137,7 @@ fn draw_t(
     thickness: f32,
     dot_center: bool,
     space_width: f32,
+    dot_size: f32,
 ) {
     let half = size / 2.0;
     let half_t = thickness / 2.0;
@@ -150,8 +153,8 @@ fn draw_t(
             let _ = target.FillEllipse(
                 &D2D1_ELLIPSE {
                     point: D2D_POINT_2F { x: cx, y: cy },
-                    radiusX: 1.5,
-                    radiusY: 1.5,
+                    radiusX: dot_size,
+                    radiusY: dot_size,
                 },
                 brush,
             );
@@ -169,14 +172,14 @@ fn draw_circle(
     dot_center: bool,
     border: bool,
     space_width: f32,
+    dot_size: f32,
 ) {
     let outer_r = size / 2.0;
-    let inner_dot_r = (thickness * 0.5).max(1.5);
 
     unsafe {
         if border && dot_center {
             let max_dot = (outer_r - thickness / 2.0 - space_width).max(0.0);
-            let actual_dot_r = inner_dot_r.min(max_dot);
+            let actual_dot_r = dot_size.min(max_dot);
 
             let _ = target.DrawEllipse(
                 &D2D1_ELLIPSE {
@@ -213,8 +216,8 @@ fn draw_circle(
             let _ = target.FillEllipse(
                 &D2D1_ELLIPSE {
                     point: D2D_POINT_2F { x: cx, y: cy },
-                    radiusX: inner_dot_r,
-                    radiusY: inner_dot_r,
+                    radiusX: dot_size,
+                    radiusY: dot_size,
                 },
                 brush,
             );
@@ -222,8 +225,8 @@ fn draw_circle(
             let _ = target.FillEllipse(
                 &D2D1_ELLIPSE {
                     point: D2D_POINT_2F { x: cx, y: cy },
-                    radiusX: 1.5,
-                    radiusY: 1.5,
+                    radiusX: dot_size,
+                    radiusY: dot_size,
                 },
                 brush,
             );
@@ -240,6 +243,7 @@ fn draw_arrow(
     thickness: f32,
     dot_center: bool,
     space_width: f32,
+    dot_size: f32,
 ) {
     let half = size / 2.0;
     let sw = space_width.min(half);
@@ -311,8 +315,8 @@ fn draw_arrow(
             let _ = target.FillEllipse(
                 &D2D1_ELLIPSE {
                     point: D2D_POINT_2F { x: cx, y: cy },
-                    radiusX: 1.5,
-                    radiusY: 1.5,
+                    radiusX: dot_size,
+                    radiusY: dot_size,
                 },
                 brush,
             );

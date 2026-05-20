@@ -135,9 +135,11 @@ pub struct Config {
     pub opacity: f32,
     pub border: bool,
     pub space_width: f32,
+    pub dot_size: f32,
     pub primary_key: String,
     pub secondary_key: String,
     pub rotation: f32,
+    pub png_crosshair: Option<String>,
 }
 
 impl Default for Config {
@@ -151,9 +153,11 @@ impl Default for Config {
             opacity: 0.85,
             border: true,
             space_width: 0.0,
+            dot_size: 1.5,
             primary_key: "CTRL".into(),
             secondary_key: "\\".into(),
             rotation: 0.0,
+            png_crosshair: None,
         }
     }
 }
@@ -249,6 +253,21 @@ impl Config {
                                 log_warning("space_width negative, clamped to 0");
                             }
                             config.space_width = v;
+                        }
+                        "dot_size" => {
+                            let v = value.parse::<f32>().unwrap_or(1.5);
+                            if v < 0.5 || v > 50.0 {
+                                log_warning(&format!("dot_size {v} out of range, clamped to 0.5..50"));
+                            }
+                            config.dot_size = v.clamp(0.5, 50.0);
+                        }
+                        "png_crosshair" => {
+                            let v = value.trim();
+                            if v.is_empty() || v.eq_ignore_ascii_case("none") || v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("false") {
+                                config.png_crosshair = None;
+                            } else {
+                                config.png_crosshair = Some(v.to_string());
+                            }
                         }
                         "primary_key" => {
                             config.primary_key = value.to_string();

@@ -1,19 +1,20 @@
 <div align="center">
   <img src="icon.png" width="120" alt="ZeroIn">
   <h1>ZeroIn</h1>
-  <p><i>"A zero-overhead, anti-cheat-safe crosshair overlay for Windows gamers"</i></p>
+  <p><i>"A zero-overhead, anti-cheat-safe crosshair overlay for Windows and Linux gamers"</i></p>
 
   <p>
     <img src="https://img.shields.io/github/v/release/mrdhnto/ZeroIn?style=for-the-badge&logo=ghost&color=00ffff" alt="Version">
-    <img src="https://img.shields.io/badge/Platform-Windows-8a2be2?style=for-the-badge&logo=windows" alt="Platform">
+    <img src="https://img.shields.io/badge/Platform-Windows-8a2be2?style=for-the-badge&logo=windows11" alt="Windows">
+    <img src="https://img.shields.io/badge/Platform-Linux-fcc624?style=for-the-badge&logo=linux" alt="Linux">
     <img src="https://img.shields.io/badge/Rust-nightly-e05a2c?style=for-the-badge&logo=rust" alt="Rust">
     <img src="https://img.shields.io/badge/License-MIT-00ff7f?style=for-the-badge" alt="License">
   </p>
 </div>
 
-The lightweight, hardware-accelerated, low-latency game crosshair overlay that works with any FPS title. No bloat. Just a tray icon and a config file.
+The lightweight, low-latency game crosshair overlay that works with any FPS title. No bloat. Just a tray icon and a config file.
 
-Renders a Direct2D-powered transparent on-screen crosshair that sits on top of any game or application in borderless windowed mode. Configure it once and toggle it from the system tray. The ultimate custom crosshair for any game.
+Renders a transparent on-screen crosshair using Direct2D (Windows) or a software rasterizer (Linux), sitting on top of any game or application in borderless windowed mode. Configure it once and toggle it from the system tray. The ultimate custom crosshair for any game.
 
 ## Features
 
@@ -33,12 +34,12 @@ Renders a Direct2D-powered transparent on-screen crosshair that sits on top of a
 
 ## Why ZeroIn?
 
-Most crosshair overlays are AutoHotkey scripts, Electron apps, or game-specific hacks. This lightweight Rust-based crosshair overlay is different:
+Most crosshair overlays are AutoHotkey scripts, Electron apps, or game-specific hacks. This lightweight Rust-based crosshair overlay works on both Windows and Linux and is different:
 
 | ZeroIn | AHK scripts | Electron overlays | Game-specific tools |
 |---|---|---|---|
 | ~512KB binary | Needs AHK runtime | 100MB+ with bundled runtime | Only one game |
-| Direct2D hardware acceleration | GDI-based (slower) | GPU compositor overhead | Game-dependent |
+| Direct2D (Win) / SwCanvas (Linux) | GDI-based (slower) | GPU compositor overhead | Game-dependent |
 | PNG crosshair support | Shapes only | Usually shapes only | Limited shapes |
 | Works with any borderless windowed game | Untested/unreliable | Untested/unreliable | Only one game |
 | Per-monitor DPI aware | No | Mostly no | Usually no |
@@ -46,13 +47,15 @@ Most crosshair overlays are AutoHotkey scripts, Electron apps, or game-specific 
 | Config auto-reload | No | Restart required | Restart required |
 | Open source MIT | Yes | Rarely | No |
 
-ZeroIn is a focused, minimal crosshair overlay for FPS games that does one thing well: render a custom crosshair you can see in any title without getting in the way. Anti-cheat safe, low latency, and invisible to anti-cheat engines.
+ZeroIn is a focused, minimal crosshair overlay for FPS games on Windows and Linux that does one thing well: render a custom crosshair you can see in any title without getting in the way. Anti-cheat safe, low latency, and invisible to anti-cheat engines.
 
 ## Compatibility & Anti-Cheat
 
-ZeroIn uses `UpdateLayeredWindow` with `WS_EX_TRANSPARENT`. The same transparent overlay technique as Discord and Steam overlays. It works with **every game running in borderless windowed mode**, no exceptions.
+**Windows:** ZeroIn uses `UpdateLayeredWindow` with `WS_EX_TRANSPARENT`. The same transparent overlay technique as Discord and Steam overlays.
 
-**Anti-cheat safe across the board.** ZeroIn does not inject, hook, read memory, or modify any process. It is a pure transparent window, invisible to kernel-level anti-cheat engines like Vanguard, BattlEye, and Easy Anti-Cheat. No detections, no bans, no risk.
+**Linux:** ZeroIn uses `winit` to create a transparent always-on-top window, `softbuffer` for pixel buffer display, and X11 ShapeMask for click-through. Works on X11 sessions; Wayland has limited support (tray icon works, but global hotkeys and click-through are unavailable).
+
+**Anti-cheat safe across the board on both platforms.** ZeroIn does not inject, hook, read memory, or modify any process. It is a pure transparent window, invisible to kernel-level anti-cheat engines like Vanguard, BattlEye, and Easy Anti-Cheat. No detections, no bans, no risk.
 
 | Game | Anti-Cheat | Status |
 |---|---|---|
@@ -71,7 +74,7 @@ Kernel-level anti-cheat (Vanguard, BattlEye, EAC, Ricochet) operates at a lower 
 
 1. [Download the latest release](https://github.com/mrdhnto/ZeroIn/releases/latest).
 2. Place `config.ini` next to the executable (optional, defaults apply otherwise).
-3. Run `ZeroIn.exe`. It lives in the system tray.
+3. Run `ZeroIn.exe` (Windows) or `./ZeroIn` (Linux). It lives in the system tray.
 4. Right-click the tray icon to:
    - Toggle crosshair on/off
    - Switch crosshair type
@@ -107,36 +110,63 @@ Default config applies if the file is missing or a value is invalid. Invalid val
 
 ## Known Limitations
 
-- **Windows only** : requires Win32 + Direct2D APIs. Linux support is being explored via a GPU abstraction layer.
 - **Single monitor** : the overlay renders on your primary display. Multi-monitor spanning is not yet supported.
 - **Polling config reload** : changes are detected every 2 seconds (not instant file system watching).
 - **Exclusive fullscreen** : some older titles in exclusive fullscreen may hide the overlay. Run in **borderless windowed mode** (display borderless windowed) for guaranteed compatibility, virtually all modern games support this.
-- **Not captured by OBS** : the overlay uses `WS_EX_TRANSPARENT` for click-through. It is visible on screen but may not appear in OBS without game capture source.
+- **Not captured by OBS** : the overlay is visible on screen but may not appear in OBS without game capture source.
+- **Linux X11-only** : requires the X11 display server. Wayland is detected at runtime; global hotkeys and click-through are unavailable on Wayland (tray icon still works).
+- **Software rendered on Linux** : crosshair is rasterized in software via SwCanvas (CPU), not GPU-accelerated like the Windows Direct2D path. Efficient (<1% CPU) for overlay use.
 
 ## Build from Source
 
 **Requirements:**
 - Rust edition 2024 (nightly)
-- Windows (uses Win32 + Direct2D APIs)
 
+**Windows:**
 ```sh
 git clone https://github.com/mrdhnto/ZeroIn
 cd ZeroIn
 cargo build --release
 ```
-
 The binary will be at `target/release/ZeroIn.exe`. Place `config.ini` and optionally `icon.ico` next to it.
+
+**Linux prerequisites:**
+```sh
+sudo apt install libx11-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev
+```
+
+**Linux:**
+```sh
+git clone https://github.com/mrdhnto/ZeroIn
+cd ZeroIn
+cargo build --release
+```
+The binary will be at `target/release/ZeroIn`. Place `config.ini` next to it.
 
 ## Technical
 
+**Windows:**
 - Uses `windows` crate (Win32 API) for overlay window, Direct2D rendering, and tray icon
-- PNG crosshair decoding via `image` crate, drawn as `ID2D1Bitmap` with premultiplied alpha
-- Profiles serialized as `presets.json` via `serde_json`
 - Renders on a transparent layered window (`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST`)
-- Crosshair drawn with Direct2D primitives (ellipses, rectangles, lines) or bitmaps via `UpdateLayeredWindow`
-- Hotkey registered via `RegisterHotKey` (global system-wide) with `WM_HOTKEY` message handling
+- Crosshair drawn with Direct2D primitives (ellipses, rectangles, lines) via `D2DCanvas` wrapper
+- PNG crosshair decoded via `image` crate, rendered as `ID2D1Bitmap` with premultiplied alpha
 - Per-monitor DPI awareness via `SetProcessDpiAwarenessContext`
-- Config auto-reload via `SetTimer` polling (`WM_TIMER` every 2s)
+- Hotkey via `RegisterHotKey` (global system-wide) with `WM_HOTKEY` message handling
+- Click-through via `WS_EX_TRANSPARENT` extended window style
+- Opacity via `UpdateLayeredWindow` with `BLENDFUNCTION.SourceConstantAlpha`
+
+**Linux:**
+- Uses `winit` + `softbuffer` for overlay window and pixel buffer display
+- Crosshair rendered via `SwCanvas` software rasterizer (premultiplied BGRA, bilinear rotation)
+- Global hotkey via `x11rb::GrabKey` background thread, sends toggle via `EventLoopProxy`
+- Click-through via X11 Shape extension (`shape_rectangles` with empty input mask)
+- System tray via `tray-icon` crate (libappindicator for X11, StatusNotifierItem for Wayland)
+- Config auto-reload via `AboutToWait` polling every 2 seconds
+
+**Cross-platform:**
+- Profiles serialized as `presets.json` via `serde_json`
+- PNG crosshair decoding via `image` crate
+- `Canvas` trait abstracts drawing primitives — `crosshair.rs` is pure math, no platform deps
 
 ## Contributing
 

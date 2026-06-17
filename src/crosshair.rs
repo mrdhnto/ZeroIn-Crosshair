@@ -1,14 +1,12 @@
 use core::f32::consts::FRAC_PI_4;
-use windows::Foundation::Numerics::Matrix3x2;
-use windows::Win32::Graphics::Direct2D::Common::{D2D_POINT_2F, D2D_RECT_F};
-use windows::Win32::Graphics::Direct2D::{D2D1_ELLIPSE, ID2D1DCRenderTarget, ID2D1SolidColorBrush};
 
+use crate::canvas::{Canvas, Color};
 use crate::config::CrosshairType;
 
 pub fn draw(
-    target: &ID2D1DCRenderTarget,
-    brush: &ID2D1SolidColorBrush,
-    border_brush: Option<&ID2D1SolidColorBrush>,
+    canvas: &mut dyn Canvas,
+    color: Color,
+    border_color: Option<Color>,
     ctype: CrosshairType,
     cx: f32,
     cy: f32,
@@ -28,59 +26,43 @@ pub fn draw(
     };
     let total = rotation.to_radians() + intrinsic;
 
-    if total != 0.0 {
-        let (sa, ca) = total.sin_cos();
-        let m = Matrix3x2 {
-            M11: ca, M12: sa,
-            M21: -sa, M22: ca,
-            M31: cx - cx * ca + cy * sa,
-            M32: cy - cx * sa - cy * ca,
-        };
-        unsafe { target.SetTransform(&m as *const Matrix3x2); }
+    let has_rotation = total != 0.0;
+    if has_rotation {
+        canvas.begin_rotation(total, cx, cy);
     }
 
     match ctype {
-        CrosshairType::Dot => draw_dot(target, brush, border_brush, cx, cy, size, border, border_size),
+        CrosshairType::Dot => draw_dot(canvas, color, border_color, cx, cy, size, border, border_size),
         CrosshairType::Cross | CrosshairType::Diamond => {
-            draw_cross(target, brush, border_brush, cx, cy, size, thickness_h, thickness_v, dot_center, border, border_size, space_width, dot_size)
+            draw_cross(canvas, color, border_color, cx, cy, size, thickness_h, thickness_v, dot_center, border, border_size, space_width, dot_size)
         }
-        CrosshairType::T => draw_t(target, brush, border_brush, cx, cy, size, thickness_h, thickness_v, dot_center, border, border_size, space_width, dot_size),
-        CrosshairType::Circle => draw_circle(target, brush, border_brush, cx, cy, size, thickness_h, thickness_v, dot_center, border, border_size, space_width, dot_size),
-        CrosshairType::Arrow => draw_arrow(target, brush, border_brush, cx, cy, size, thickness_h, thickness_v, dot_center, border, border_size, space_width, dot_size),
+        CrosshairType::T => draw_t(canvas, color, border_color, cx, cy, size, thickness_h, thickness_v, dot_center, border, border_size, space_width, dot_size),
+        CrosshairType::Circle => draw_circle(canvas, color, border_color, cx, cy, size, thickness_h, thickness_v, dot_center, border, border_size, space_width, dot_size),
+        CrosshairType::Arrow => draw_arrow(canvas, color, border_color, cx, cy, size, thickness_h, thickness_v, dot_center, border, border_size, space_width, dot_size),
     }
 
-    if total != 0.0 {
-        let identity = Matrix3x2 {
-            M11: 1.0, M12: 0.0,
-            M21: 0.0, M22: 1.0,
-            M31: 0.0, M32: 0.0,
-        };
-        unsafe { target.SetTransform(&identity as *const Matrix3x2); }
+    if has_rotation {
+        canvas.end_rotation();
     }
 }
 
 fn draw_split_rect(
-    target: &ID2D1DCRenderTarget,
-    brush: &ID2D1SolidColorBrush,
+    canvas: &mut dyn Canvas,
     left: f32,
     top: f32,
     right: f32,
     bottom: f32,
+    color: Color,
 ) {
     if left < right && top < bottom {
-        let _ = unsafe {
-            target.FillRectangle(
-                &D2D_RECT_F { left, top, right, bottom },
-                brush,
-            )
-        };
+        canvas.fill_rect(left, top, right, bottom, color);
     }
 }
 
 fn draw_dot(
-    target: &ID2D1DCRenderTarget,
-    brush: &ID2D1SolidColorBrush,
-    border_brush: Option<&ID2D1SolidColorBrush>,
+    canvas: &mut dyn Canvas,
+    color: Color,
+    border_color: Option<Color>,
     cx: f32,
     cy: f32,
     size: f32,
@@ -90,37 +72,18 @@ fn draw_dot(
     let radius = size / 2.0;
 
     if border && border_size > 0.0 {
-        if let Some(bb) = border_brush {
-            let outer = radius + border_size;
-            let _ = unsafe {
-                target.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: D2D_POINT_2F { x: cx, y: cy },
-                        radiusX: outer,
-                        radiusY: outer,
-                    },
-                    bb,
-                )
-            };
+        if let Some(bc) = border_color {
+            canvas.fill_ellipse(cx, cy, radius + border_size, radius + border_size, bc);
         }
     }
 
-    let _ = unsafe {
-        target.FillEllipse(
-            &D2D1_ELLIPSE {
-                point: D2D_POINT_2F { x: cx, y: cy },
-                radiusX: radius,
-                radiusY: radius,
-            },
-            brush,
-        )
-    };
+    canvas.fill_ellipse(cx, cy, radius, radius, color);
 }
 
 fn draw_cross(
-    target: &ID2D1DCRenderTarget,
-    brush: &ID2D1SolidColorBrush,
-    border_brush: Option<&ID2D1SolidColorBrush>,
+    canvas: &mut dyn Canvas,
+    color: Color,
+    border_color: Option<Color>,
     cx: f32,
     cy: f32,
     size: f32,
@@ -131,7 +94,7 @@ fn draw_cross(
     border_size: f32,
     space_width: f32,
     dot_size: f32,
-) { unsafe {
+) {
     let half = size / 2.0;
     let half_t_h = thickness_h / 2.0;
     let half_t_v = thickness_v / 2.0;
@@ -139,45 +102,31 @@ fn draw_cross(
     let bs = border_size;
 
     if border && bs > 0.0 {
-        if let Some(bb) = border_brush {
-            draw_split_rect(target, bb, cx - half - bs, cy - half_t_v - bs, cx - sw + bs, cy + half_t_v + bs);
-            draw_split_rect(target, bb, cx + sw - bs, cy - half_t_v - bs, cx + half + bs, cy + half_t_v + bs);
-            draw_split_rect(target, bb, cx - half_t_h - bs, cy - half - bs, cx + half_t_h + bs, cy - sw + bs);
-            draw_split_rect(target, bb, cx - half_t_h - bs, cy + sw - bs, cx + half_t_h + bs, cy + half + bs);
+        if let Some(bc) = border_color {
+            draw_split_rect(canvas, cx - half - bs, cy - half_t_v - bs, cx - sw + bs, cy + half_t_v + bs, bc);
+            draw_split_rect(canvas, cx + sw - bs, cy - half_t_v - bs, cx + half + bs, cy + half_t_v + bs, bc);
+            draw_split_rect(canvas, cx - half_t_h - bs, cy - half - bs, cx + half_t_h + bs, cy - sw + bs, bc);
+            draw_split_rect(canvas, cx - half_t_h - bs, cy + sw - bs, cx + half_t_h + bs, cy + half + bs, bc);
             if dot_center {
-                let _ = target.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: D2D_POINT_2F { x: cx, y: cy },
-                        radiusX: dot_size + bs,
-                        radiusY: dot_size + bs,
-                    },
-                    bb,
-                );
+                canvas.fill_ellipse(cx, cy, dot_size + bs, dot_size + bs, bc);
             }
         }
     }
 
-    draw_split_rect(target, brush, cx - half, cy - half_t_v, cx - sw, cy + half_t_v);
-    draw_split_rect(target, brush, cx + sw, cy - half_t_v, cx + half, cy + half_t_v);
-    draw_split_rect(target, brush, cx - half_t_h, cy - half, cx + half_t_h, cy - sw);
-    draw_split_rect(target, brush, cx - half_t_h, cy + sw, cx + half_t_h, cy + half);
+    draw_split_rect(canvas, cx - half, cy - half_t_v, cx - sw, cy + half_t_v, color);
+    draw_split_rect(canvas, cx + sw, cy - half_t_v, cx + half, cy + half_t_v, color);
+    draw_split_rect(canvas, cx - half_t_h, cy - half, cx + half_t_h, cy - sw, color);
+    draw_split_rect(canvas, cx - half_t_h, cy + sw, cx + half_t_h, cy + half, color);
 
     if dot_center {
-        let _ = target.FillEllipse(
-            &D2D1_ELLIPSE {
-                point: D2D_POINT_2F { x: cx, y: cy },
-                radiusX: dot_size,
-                radiusY: dot_size,
-            },
-            brush,
-        );
+        canvas.fill_ellipse(cx, cy, dot_size, dot_size, color);
     }
-}}
+}
 
 fn draw_t(
-    target: &ID2D1DCRenderTarget,
-    brush: &ID2D1SolidColorBrush,
-    border_brush: Option<&ID2D1SolidColorBrush>,
+    canvas: &mut dyn Canvas,
+    color: Color,
+    border_color: Option<Color>,
     cx: f32,
     cy: f32,
     size: f32,
@@ -188,7 +137,7 @@ fn draw_t(
     border_size: f32,
     space_width: f32,
     dot_size: f32,
-) { unsafe {
+) {
     let half = size / 2.0;
     let half_t_h = thickness_h / 2.0;
     let half_t_v = thickness_v / 2.0;
@@ -196,45 +145,31 @@ fn draw_t(
     let bs = border_size;
 
     if border && bs > 0.0 {
-        if let Some(bb) = border_brush {
-            draw_split_rect(target, bb, cx - half - bs, cy - half_t_v - bs, cx - sw + bs, cy + half_t_v + bs);
-            draw_split_rect(target, bb, cx + sw - bs, cy - half_t_v - bs, cx + half + bs, cy + half_t_v + bs);
-            draw_split_rect(target, bb, cx - half_t_h - bs, cy - half_t_h - bs, cx + half_t_h + bs, cy - sw + bs);
-            draw_split_rect(target, bb, cx - half_t_h - bs, cy + sw - bs, cx + half_t_h + bs, cy + half + bs);
+        if let Some(bc) = border_color {
+            draw_split_rect(canvas, cx - half - bs, cy - half_t_v - bs, cx - sw + bs, cy + half_t_v + bs, bc);
+            draw_split_rect(canvas, cx + sw - bs, cy - half_t_v - bs, cx + half + bs, cy + half_t_v + bs, bc);
+            draw_split_rect(canvas, cx - half_t_h - bs, cy - half_t_h - bs, cx + half_t_h + bs, cy - sw + bs, bc);
+            draw_split_rect(canvas, cx - half_t_h - bs, cy + sw - bs, cx + half_t_h + bs, cy + half + bs, bc);
             if dot_center {
-                let _ = target.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: D2D_POINT_2F { x: cx, y: cy },
-                        radiusX: dot_size + bs,
-                        radiusY: dot_size + bs,
-                    },
-                    bb,
-                );
+                canvas.fill_ellipse(cx, cy, dot_size + bs, dot_size + bs, bc);
             }
         }
     }
 
-    draw_split_rect(target, brush, cx - half, cy - half_t_v, cx - sw, cy + half_t_v);
-    draw_split_rect(target, brush, cx + sw, cy - half_t_v, cx + half, cy + half_t_v);
-    draw_split_rect(target, brush, cx - half_t_h, cy - half_t_h, cx + half_t_h, cy - sw);
-    draw_split_rect(target, brush, cx - half_t_h, cy + sw, cx + half_t_h, cy + half);
+    draw_split_rect(canvas, cx - half, cy - half_t_v, cx - sw, cy + half_t_v, color);
+    draw_split_rect(canvas, cx + sw, cy - half_t_v, cx + half, cy + half_t_v, color);
+    draw_split_rect(canvas, cx - half_t_h, cy - half_t_h, cx + half_t_h, cy - sw, color);
+    draw_split_rect(canvas, cx - half_t_h, cy + sw, cx + half_t_h, cy + half, color);
 
     if dot_center {
-        let _ = target.FillEllipse(
-            &D2D1_ELLIPSE {
-                point: D2D_POINT_2F { x: cx, y: cy },
-                radiusX: dot_size,
-                radiusY: dot_size,
-            },
-            brush,
-        );
+        canvas.fill_ellipse(cx, cy, dot_size, dot_size, color);
     }
-}}
+}
 
 fn draw_circle(
-    target: &ID2D1DCRenderTarget,
-    brush: &ID2D1SolidColorBrush,
-    border_brush: Option<&ID2D1SolidColorBrush>,
+    canvas: &mut dyn Canvas,
+    color: Color,
+    border_color: Option<Color>,
     cx: f32,
     cy: f32,
     size: f32,
@@ -245,54 +180,23 @@ fn draw_circle(
     border_size: f32,
     space_width: f32,
     dot_size: f32,
-) { unsafe {
+) {
     let outer_r = size / 2.0;
     let stroke = thickness_h;
     let bs = border_size;
     let outline_mode = border;
 
     if bs > 0.0 {
-        if let Some(bb) = border_brush {
+        if let Some(bc) = border_color {
             if outline_mode {
-                let border_stroke = stroke + bs * 2.0;
-                let _ = target.DrawEllipse(
-                    &D2D1_ELLIPSE {
-                        point: D2D_POINT_2F { x: cx, y: cy },
-                        radiusX: outer_r + bs,
-                        radiusY: outer_r + bs,
-                    },
-                    bb,
-                    border_stroke,
-                    None,
-                );
+                canvas.draw_ellipse(cx, cy, outer_r + bs, outer_r + bs, stroke + bs * 2.0, bc);
             } else if dot_center {
-                let _ = target.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: D2D_POINT_2F { x: cx, y: cy },
-                        radiusX: dot_size + bs,
-                        radiusY: dot_size + bs,
-                    },
-                    bb,
-                );
+                canvas.fill_ellipse(cx, cy, dot_size + bs, dot_size + bs, bc);
             } else {
-                let _ = target.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: D2D_POINT_2F { x: cx, y: cy },
-                        radiusX: outer_r + bs,
-                        radiusY: outer_r + bs,
-                    },
-                    bb,
-                );
+                canvas.fill_ellipse(cx, cy, outer_r + bs, outer_r + bs, bc);
             }
             if dot_center {
-                let _ = target.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: D2D_POINT_2F { x: cx, y: cy },
-                        radiusX: dot_size + bs,
-                        radiusY: dot_size + bs,
-                    },
-                    bb,
-                );
+                canvas.fill_ellipse(cx, cy, dot_size + bs, dot_size + bs, bc);
             }
         }
     }
@@ -300,62 +204,23 @@ fn draw_circle(
     if outline_mode && dot_center {
         let max_dot = (outer_r - stroke / 2.0 - space_width).max(0.0);
         let actual_dot_r = dot_size.min(max_dot);
-        let _ = target.DrawEllipse(
-            &D2D1_ELLIPSE {
-                point: D2D_POINT_2F { x: cx, y: cy },
-                radiusX: outer_r,
-                radiusY: outer_r,
-            },
-            brush,
-            stroke,
-            None,
-        );
+        canvas.draw_ellipse(cx, cy, outer_r, outer_r, stroke, color);
         if actual_dot_r > 0.0 {
-            let _ = target.FillEllipse(
-                &D2D1_ELLIPSE {
-                    point: D2D_POINT_2F { x: cx, y: cy },
-                    radiusX: actual_dot_r,
-                    radiusY: actual_dot_r,
-                },
-                brush,
-            );
+            canvas.fill_ellipse(cx, cy, actual_dot_r, actual_dot_r, color);
         }
     } else if outline_mode && !dot_center {
-        let _ = target.DrawEllipse(
-            &D2D1_ELLIPSE {
-                point: D2D_POINT_2F { x: cx, y: cy },
-                radiusX: outer_r,
-                radiusY: outer_r,
-            },
-            brush,
-            stroke,
-            None,
-        );
+        canvas.draw_ellipse(cx, cy, outer_r, outer_r, stroke, color);
     } else if !outline_mode && dot_center {
-        let _ = target.FillEllipse(
-            &D2D1_ELLIPSE {
-                point: D2D_POINT_2F { x: cx, y: cy },
-                radiusX: dot_size,
-                radiusY: dot_size,
-            },
-            brush,
-        );
+        canvas.fill_ellipse(cx, cy, dot_size, dot_size, color);
     } else {
-        let _ = target.FillEllipse(
-            &D2D1_ELLIPSE {
-                point: D2D_POINT_2F { x: cx, y: cy },
-                radiusX: outer_r,
-                radiusY: outer_r,
-            },
-            brush,
-        );
+        canvas.fill_ellipse(cx, cy, outer_r, outer_r, color);
     }
-}}
+}
 
 fn draw_arrow(
-    target: &ID2D1DCRenderTarget,
-    brush: &ID2D1SolidColorBrush,
-    border_brush: Option<&ID2D1SolidColorBrush>,
+    canvas: &mut dyn Canvas,
+    color: Color,
+    border_color: Option<Color>,
     cx: f32,
     cy: f32,
     size: f32,
@@ -366,7 +231,7 @@ fn draw_arrow(
     border_size: f32,
     space_width: f32,
     dot_size: f32,
-) { unsafe {
+) {
     let half = size / 2.0;
     let sw = space_width.min(half);
     let arm = (half - sw) * 0.55;
@@ -374,58 +239,43 @@ fn draw_arrow(
     let half_t_v = thickness_v / 2.0;
     let bs = border_size;
 
-    // Arrow line pairs: 0-3 are "horizontal" origin (use thickness_v), 4-7 are "vertical" origin (use thickness_h)
-    let lines_h: [(D2D_POINT_2F, D2D_POINT_2F); 4] = [
-        (D2D_POINT_2F { x: cx + sw, y: cy - half_t_v }, D2D_POINT_2F { x: cx + sw + arm, y: cy - arm }),
-        (D2D_POINT_2F { x: cx + sw, y: cy + half_t_v }, D2D_POINT_2F { x: cx + sw + arm, y: cy + arm }),
-        (D2D_POINT_2F { x: cx - sw, y: cy - half_t_v }, D2D_POINT_2F { x: cx - sw - arm, y: cy - arm }),
-        (D2D_POINT_2F { x: cx - sw, y: cy + half_t_v }, D2D_POINT_2F { x: cx - sw - arm, y: cy + arm }),
+    let lines_h = [
+        (cx + sw, cy - half_t_v, cx + sw + arm, cy - arm),
+        (cx + sw, cy + half_t_v, cx + sw + arm, cy + arm),
+        (cx - sw, cy - half_t_v, cx - sw - arm, cy - arm),
+        (cx - sw, cy + half_t_v, cx - sw - arm, cy + arm),
     ];
-    let lines_v: [(D2D_POINT_2F, D2D_POINT_2F); 4] = [
-        (D2D_POINT_2F { x: cx - half_t_h, y: cy - sw }, D2D_POINT_2F { x: cx - arm, y: cy - sw - arm }),
-        (D2D_POINT_2F { x: cx + half_t_h, y: cy - sw }, D2D_POINT_2F { x: cx + arm, y: cy - sw - arm }),
-        (D2D_POINT_2F { x: cx - half_t_h, y: cy + sw }, D2D_POINT_2F { x: cx - arm, y: cy + sw + arm }),
-        (D2D_POINT_2F { x: cx + half_t_h, y: cy + sw }, D2D_POINT_2F { x: cx + arm, y: cy + sw + arm }),
+    let lines_v = [
+        (cx - half_t_h, cy - sw, cx - arm, cy - sw - arm),
+        (cx + half_t_h, cy - sw, cx + arm, cy - sw - arm),
+        (cx - half_t_h, cy + sw, cx - arm, cy + sw + arm),
+        (cx + half_t_h, cy + sw, cx + arm, cy + sw + arm),
     ];
 
     if border && bs > 0.0 {
-        if let Some(bb) = border_brush {
+        if let Some(bc) = border_color {
             let th = thickness_v + bs * 2.0;
             let tv = thickness_h + bs * 2.0;
-            for &(p1, p2) in &lines_h {
-                let _ = target.DrawLine(p1, p2, bb, th, None);
+            for &(x1, y1, x2, y2) in &lines_h {
+                canvas.draw_line(x1, y1, x2, y2, th, bc);
             }
-            for &(p1, p2) in &lines_v {
-                let _ = target.DrawLine(p1, p2, bb, tv, None);
+            for &(x1, y1, x2, y2) in &lines_v {
+                canvas.draw_line(x1, y1, x2, y2, tv, bc);
             }
             if dot_center {
-                let _ = target.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: D2D_POINT_2F { x: cx, y: cy },
-                        radiusX: dot_size + bs,
-                        radiusY: dot_size + bs,
-                    },
-                    bb,
-                );
+                canvas.fill_ellipse(cx, cy, dot_size + bs, dot_size + bs, bc);
             }
         }
     }
 
-    for &(p1, p2) in &lines_h {
-        let _ = target.DrawLine(p1, p2, brush, thickness_v, None);
+    for &(x1, y1, x2, y2) in &lines_h {
+        canvas.draw_line(x1, y1, x2, y2, thickness_v, color);
     }
-    for &(p1, p2) in &lines_v {
-        let _ = target.DrawLine(p1, p2, brush, thickness_h, None);
+    for &(x1, y1, x2, y2) in &lines_v {
+        canvas.draw_line(x1, y1, x2, y2, thickness_h, color);
     }
 
     if dot_center {
-        let _ = target.FillEllipse(
-            &D2D1_ELLIPSE {
-                point: D2D_POINT_2F { x: cx, y: cy },
-                radiusX: dot_size,
-                radiusY: dot_size,
-            },
-            brush,
-        );
+        canvas.fill_ellipse(cx, cy, dot_size, dot_size, color);
     }
-}}
+}

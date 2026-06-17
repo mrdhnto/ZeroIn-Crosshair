@@ -1,0 +1,85 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [master, main]
+    tags: ['v*']
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libx11-dev \
+            libxkbcommon-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcb-randr0-dev \
+            libxcb-composite0-dev \
+            libxcb-xkb-dev \
+            libxcb-xinput-dev \
+            libxcb-xinerama0-dev \
+            libxcb-cursor-dev \
+            libasound2-dev \
+            libgtk-3-dev
+          # tray-icon may use libappindicator (fails on Ubuntu >=24.04, fallback to libayatana)
+          sudo apt-get install -y libappindicator-dev 2>/dev/null \
+            || sudo apt-get install -y libayatana-appindicator-dev
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZeroIn-${{ runner.os }}
+          path: |
+            target/release/ZeroIn
+            target/release/ZeroIn.exe
+            target/release/ZeroIn.pdb
+
+  release:
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Rename and archive releases
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          mv ZeroIn-Linux/ZeroIn "ZeroIn-${TAG}-linux"
+          mv ZeroIn-Windows/ZeroIn.exe "ZeroIn-${TAG}-windows.exe"
+          [ -f ZeroIn-Windows/ZeroIn.pdb ] && mv ZeroIn-Windows/ZeroIn.pdb "ZeroIn-${TAG}-windows.pdb"
+          tar czf "ZeroIn-${TAG}-linux.tar.gz" "ZeroIn-${TAG}-linux"
+          zip "ZeroIn-${TAG}-windows.zip" "ZeroIn-${TAG}-windows.exe" "ZeroIn-${TAG}-windows.pdb"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ZeroIn-*-linux.tar.gz
+            ZeroIn-*-windows.zip

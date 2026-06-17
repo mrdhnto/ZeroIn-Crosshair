@@ -7,8 +7,9 @@
     <img src="https://img.shields.io/github/v/release/mrdhnto/ZeroIn?style=for-the-badge&logo=ghost&color=00ffff" alt="Version">
     <img src="https://img.shields.io/badge/Platform-Windows-8a2be2?style=for-the-badge&logo=windows11" alt="Windows">
     <img src="https://img.shields.io/badge/Platform-Linux-fcc624?style=for-the-badge&logo=linux" alt="Linux">
-    <img src="https://img.shields.io/badge/Rust-nightly-e05a2c?style=for-the-badge&logo=rust" alt="Rust">
+    <img src="https://img.shields.io/badge/Rust-stable-e05a2c?style=for-the-badge&logo=rust" alt="Rust">
     <img src="https://img.shields.io/badge/License-MIT-00ff7f?style=for-the-badge" alt="License">
+    <img src="https://img.shields.io/github/actions/workflow/status/mrdhnto/ZeroIn/ci.yml?style=for-the-badge&logo=githubactions&label=CI" alt="CI">
   </p>
 </div>
 
@@ -38,7 +39,7 @@ Most crosshair overlays are AutoHotkey scripts, Electron apps, or game-specific 
 
 | ZeroIn | AHK scripts | Electron overlays | Game-specific tools |
 |---|---|---|---|
-| ~512KB binary | Needs AHK runtime | 100MB+ with bundled runtime | Only one game |
+| ~600KB binary | Needs AHK runtime | 100MB+ with bundled runtime | Only one game |
 | Direct2D (Win) / SwCanvas (Linux) | GDI-based (slower) | GPU compositor overhead | Game-dependent |
 | PNG crosshair support | Shapes only | Usually shapes only | Limited shapes |
 | Works with any borderless windowed game | Untested/unreliable | Untested/unreliable | Only one game |
@@ -120,7 +121,7 @@ Default config applies if the file is missing or a value is invalid. Invalid val
 ## Build from Source
 
 **Requirements:**
-- Rust edition 2024 (nightly)
+- Rust edition 2024 (stable, ≥1.85)
 
 **Windows:**
 ```sh
@@ -132,8 +133,12 @@ The binary will be at `target/release/ZeroIn.exe`. Place `config.ini` and option
 
 **Linux prerequisites:**
 ```sh
-sudo apt install libx11-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev
+sudo apt install build-essential pkg-config libgtk-3-dev libx11-dev \
+  libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev \
+  libxcb-composite0-dev libxcb-xkb-dev libxcb-xinput-dev \
+  libxcb-xinerama0-dev libxcb-cursor-dev libasound2-dev
 ```
+*Tray icon on Ubuntu ≥24.04: install `libayatana-appindicator-dev` instead of `libappindicator-dev`.*
 
 **Linux:**
 ```sh
@@ -158,10 +163,12 @@ The binary will be at `target/release/ZeroIn`. Place `config.ini` next to it.
 **Linux:**
 - Uses `winit` + `softbuffer` for overlay window and pixel buffer display
 - Crosshair rendered via `SwCanvas` software rasterizer (premultiplied BGRA, bilinear rotation)
-- Global hotkey via `x11rb::GrabKey` background thread, sends toggle via `EventLoopProxy`
-- Click-through via X11 Shape extension (`shape_rectangles` with empty input mask)
-- System tray via `tray-icon` crate (libappindicator for X11, StatusNotifierItem for Wayland)
+- Global hotkey via `x11rb::GrabKey` background thread with comprehensive VK→X11 keysym mapping, sends toggle via `EventLoopProxy`
+- Click-through via `set_cursor_hittest(false)` (winit) + X11 `shape_rectangles` for input passthrough
+- System tray via `tray-icon` crate in a dedicated GTK thread (`gtk::main_iteration_do` pump), with radio-opacity and toggle-checked commands bridged via channel
+- GTK 3.24+ required for tray icon (libappindicator / ayatana-appindicator)
 - Config auto-reload via `AboutToWait` polling every 2 seconds
+- Tray icon loaded from embedded `icon.png` at compile time, with file fallback
 
 **Cross-platform:**
 - Profiles serialized as `presets.json` via `serde_json`
@@ -178,4 +185,4 @@ MIT
 
 ---
 
-*Keywords: crosshair overlay, transparent crosshair, game crosshair overlay, Windows crosshair, FPS crosshair, custom crosshair, on-screen crosshair, aim crosshair, crosshair for any game, gaming overlay, Direct2D overlay, hardware accelerated crosshair, lightweight crosshair, Rust game utility, no bloat crosshair, low latency crosshair, anti-cheat safe crosshair, Vanguard safe crosshair, BattlEye safe crosshair, EAC safe crosshair, undetected crosshair, Valorant crosshair overlay, CS2 crosshair, Apex Legends crosshair, Fortnite crosshair, crosshair for FPS games, borderless windowed crosshair, display borderless windowed crosshair, Rust crosshair overlay, Windows gaming overlay, free crosshair overlay, open source crosshair overlay, crosshair-x alternative, crosshair-y alternative, crosshairx alternative, crosshairy alternative, crosshair x alternative, crosshair y alternative.*
+*Keywords: crosshair overlay, transparent crosshair, game crosshair overlay, Windows crosshair, Linux crosshair FPS crosshair, custom crosshair, on-screen crosshair, aim crosshair, crosshair for any game, gaming overlay, Direct2D overlay, hardware accelerated crosshair, lightweight crosshair, Rust game utility, no bloat crosshair, low latency crosshair, anti-cheat safe crosshair, Vanguard safe crosshair, BattlEye safe crosshair, EAC safe crosshair, undetected crosshair, Valorant crosshair overlay, CS2 crosshair, Apex Legends crosshair, Fortnite crosshair, crosshair for FPS games, borderless windowed crosshair, display borderless windowed crosshair, Rust crosshair overlay, Windows gaming overlay, free crosshair overlay, open source crosshair overlay, crosshair-x alternative, crosshair-y alternative, crosshairx alternative, crosshairy alternative, crosshair x alternative, crosshair y alternative.*

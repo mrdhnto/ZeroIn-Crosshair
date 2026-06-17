@@ -1,22 +1,18 @@
 use std::cell::RefCell;
+use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{Fullscreen, WindowLevel, Window};
+use winit::window::{CursorIcon, WindowLevel, Window};
 
-use softbuffer::Surface;
-
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::TrayIconBuilder;
 
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::ConnectionExt as XProtoConnectionExt;
-use x11rb::protocol::shape::ConnectionExt as ShapeConnectionExt;
-
-use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::canvas::{Canvas, SwCanvas, blend_premul};
 use crate::config::{Config, CrosshairType, Hotkey};
@@ -32,17 +28,6 @@ struct App {
     profiles: crate::profiles::Profiles,
     png_pixels: Option<(Vec<u8>, u32, u32)>,
     window_size: PhysicalSize<u32>,
-}
-
-struct TrayMenuSet {
-    toggle: CheckMenuItem,
-    type_items: Vec<MenuItem>,
-    opacity_items: Vec<CheckMenuItem>,
-    profile_items: Vec<MenuItem>,
-    save_current: MenuItem,
-    save_new: MenuItem,
-    reload_profiles: MenuItem,
-    exit_item: MenuItem,
 }
 
 enum UserEvent {
@@ -112,6 +97,19 @@ fn load_png_pixels(config: &Config) -> Option<(Vec<u8>, u32, u32)> {
 }
 
 fn try_load_tray_icon() -> Option<tray_icon::Icon> {
+    // Try embedded icon first (compile-time)
+    let embedded = include_bytes!("../../icon.png");
+    if let Ok(img) = image::load_from_memory(embedded) {
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        if w > 0 && h > 0 {
+            if let Ok(icon) = tray_icon::Icon::from_rgba(rgba.into_raw(), w, h) {
+                return Some(icon);
+            }
+        }
+    }
+
+    // Fallback to file lookup
     let paths = ["focus.png", "icon.png", "new-icon.png"];
     for name in &paths {
         let path = exe_dir().join(name);
@@ -128,68 +126,149 @@ fn try_load_tray_icon() -> Option<tray_icon::Icon> {
     None
 }
 
-fn build_tray_menu(app: &Rc<RefCell<App>>) -> (TrayMenuSet, Menu) {
-    let menu = Menu::new();
+struct TrayMenuIds {
+    toggle_id: MenuId,
+    type_ids: Vec<MenuId>,
+    opacity_ids: Vec<MenuId>,
+    save_current_id: MenuId,
+    save_new_id: MenuId,
+    reload_profiles_id: MenuId,
+    exit_id: MenuId,
+}
 
-    let toggle = CheckMenuItem::new("Toggle On/Off", true, false, None);
-    menu.append(&toggle).unwrap();
-    menu.append(&PredefinedMenuItem::separator()).unwrap();
+enum TrayCommand {
+    SetToggleChecked(bool),
+    OpacityRadio(usize),
+}
 
-    let type_submenu = Submenu::new("Crosshair Type", true);
-    let type_names = ["Dot", "Cross", "T", "Circle", "Diamond", "Arrow"];
-    let type_items: Vec<MenuItem> = type_names.iter().map(|&n| {
-        let item = MenuItem::new(n, true, None);
-        type_submenu.append(&item).unwrap();
-        item
-    }).collect();
-    menu.append(&type_submenu).unwrap();
-    menu.append(&PredefinedMenuItem::separator()).unwrap();
+fn load_tray_ids_and_spawn_gtk(
+    profile_names: Vec<String>,
+    icon: Option<tray_icon::Icon>,
+) -> (TrayMenuIds, std::sync::mpsc::Sender<TrayCommand>) {
+    let (id_tx, id_rx) = std::sync::mpsc::channel();
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
 
-    let opacity_submenu = Submenu::new("Opacity", true);
-    let opacity_items: Vec<CheckMenuItem> = OPACITY_PRESETS.iter().map(|&val| {
-        let label = format!("{:.2}", val);
-        let item = CheckMenuItem::new(&label, true, false, None);
-        opacity_submenu.append(&item).unwrap();
-        item
-    }).collect();
-    menu.append(&opacity_submenu).unwrap();
-    menu.append(&PredefinedMenuItem::separator()).unwrap();
+    std::thread::Builder::new()
+        .name("gtk-main".to_string())
+        .spawn(move || {
+            gtk::init().expect("GTK initialization failed");
 
-    let profiles_submenu = Submenu::new("Profiles", true);
-    let profile_items: Vec<MenuItem> = Vec::new(); // populated on rebuild
-    let save_current = MenuItem::new("Save Current", true, None);
-    let save_new = MenuItem::new("Save As New Profile", true, None);
-    let reload_profiles = MenuItem::new("Reload Profiles", true, None);
-    profiles_submenu.append(&save_current).unwrap();
-    profiles_submenu.append(&save_new).unwrap();
-    profiles_submenu.append(&reload_profiles).unwrap();
-    menu.append(&profiles_submenu).unwrap();
-    menu.append(&PredefinedMenuItem::separator()).unwrap();
+            let toggle = CheckMenuItem::new("Toggle On/Off", true, false, None);
+            let type_items: Vec<MenuItem> = ["Dot", "Cross", "T", "Circle", "Diamond", "Arrow"]
+                .iter().map(|&n| MenuItem::new(n, true, None)).collect();
+            let opacity_items: Vec<CheckMenuItem> = OPACITY_PRESETS.iter().map(|&val| {
+                CheckMenuItem::new(&format!("{:.2}", val), true, false, None)
+            }).collect();
+            let save_current = MenuItem::new("Save Current", true, None);
+            let save_new = MenuItem::new("Save As New Profile", true, None);
+            let reload_profiles = MenuItem::new("Reload Profiles", true, None);
+            let exit_item = MenuItem::new("Exit", true, None);
 
-    let exit_item = MenuItem::new("Exit", true, None);
-    menu.append(&exit_item).unwrap();
+            let ids = TrayMenuIds {
+                toggle_id: toggle.id().clone(),
+                type_ids: type_items.iter().map(|i| i.id().clone()).collect(),
+                opacity_ids: opacity_items.iter().map(|i| i.id().clone()).collect(),
+                save_current_id: save_current.id().clone(),
+                save_new_id: save_new.id().clone(),
+                reload_profiles_id: reload_profiles.id().clone(),
+                exit_id: exit_item.id().clone(),
+            };
 
-    // Rebuild profile list in profiles_submenu
-    let app = app.borrow();
-    let items = menu.items();
-    let profiles_menu_ref = items.last().unwrap().as_submenu().unwrap();
-    // Insert profile items before Save Current
-    for (i, profile) in app.profiles.list.iter().enumerate() {
-        let item = MenuItem::new(&profile.name, true, None);
-        // Insert at position (before Save Current)
-        profiles_menu_ref.insert(&item, i).unwrap();
-    }
+            let menu = Menu::new();
+            menu.append(&toggle).unwrap();
+            menu.append(&PredefinedMenuItem::separator()).unwrap();
 
-    (TrayMenuSet {
-        toggle,
-        type_items,
-        opacity_items,
-        profile_items,
-        save_current,
-        save_new,
-        reload_profiles,
-        exit_item,
-    }, menu)
+            let type_submenu = Submenu::new("Crosshair Type", true);
+            for item in &type_items {
+                type_submenu.append(item).unwrap();
+            }
+            menu.append(&type_submenu).unwrap();
+            menu.append(&PredefinedMenuItem::separator()).unwrap();
+
+            let opacity_submenu = Submenu::new("Opacity", true);
+            for item in &opacity_items {
+                opacity_submenu.append(item).unwrap();
+            }
+            menu.append(&opacity_submenu).unwrap();
+            menu.append(&PredefinedMenuItem::separator()).unwrap();
+
+            let profiles_submenu = Submenu::new("Profiles", true);
+            for (i, name) in profile_names.iter().enumerate() {
+                let item = MenuItem::new(name, true, None);
+                profiles_submenu.insert(&item, i).unwrap();
+            }
+            profiles_submenu.append(&save_current).unwrap();
+            profiles_submenu.append(&save_new).unwrap();
+            profiles_submenu.append(&reload_profiles).unwrap();
+            menu.append(&profiles_submenu).unwrap();
+            menu.append(&PredefinedMenuItem::separator()).unwrap();
+
+            menu.append(&exit_item).unwrap();
+
+            let mut builder = TrayIconBuilder::new().with_tooltip("ZeroIn Crosshair");
+            if let Some(ic) = icon {
+                builder = builder.with_icon(ic);
+            }
+            let _tray_icon = builder.with_menu(Box::new(menu)).build();
+
+            id_tx.send(ids).ok();
+
+            loop {
+                gtk::main_iteration_do(false);
+                while let Ok(cmd) = cmd_rx.try_recv() {
+                    match cmd {
+                        TrayCommand::SetToggleChecked(v) => toggle.set_checked(v),
+                        TrayCommand::OpacityRadio(idx) => {
+                            for (i, item) in opacity_items.iter().enumerate() {
+                                item.set_checked(i == idx);
+                            }
+                        }
+                    }
+                }
+                std::thread::yield_now();
+            }
+        })
+        .unwrap();
+
+    let ids = id_rx.recv_timeout(Duration::from_secs(5)).expect("GTK startup timed out");
+    (ids, cmd_tx)
+}
+
+fn vk_to_keysym(vk: u16) -> Option<u32> {
+    // Map Windows virtual-key codes to X11 keysyms
+    Some(match vk {
+        0x41..=0x5A => vk as u32,                    // A-Z
+        0x30..=0x39 => vk as u32,                    // 0-9
+        0x20 => 0x20,                                 // Space
+        0x0D => 0xFF0D,                               // Return (XK_Return)
+        0x09 => 0xFF09,                               // Tab (XK_Tab)
+        0x1B => 0xFF1B,                               // Escape (XK_Escape)
+        0x08 => 0xFF08,                               // Backspace (XK_BackSpace)
+        0x2E => 0xFFFF,                               // Delete (XK_Delete)
+        0x2D => 0xFF63,                               // Insert (XK_Insert)
+        0x24 => 0xFF50,                               // Home (XK_Home)
+        0x23 => 0xFF57,                               // End (XK_End)
+        0x21 => 0xFF55,                               // Page Up (XK_Page_Up)
+        0x22 => 0xFF56,                               // Page Down (XK_Page_Down)
+        0x25 => 0xFF51,                               // Left (XK_Left)
+        0x27 => 0xFF53,                               // Right (XK_Right)
+        0x26 => 0xFF52,                               // Up (XK_Up)
+        0x28 => 0xFF54,                               // Down (XK_Down)
+        0x70..=0x87 => 0xFFBE + (vk - 0x70) as u32,   // F1-F24
+        0xBA => 0x3B,                                 // ;: (XK_semicolon)
+        0xBB => 0x3D,                                 // =+ (XK_equal)
+        0xBC => 0x2C,                                 // , (XK_comma)
+        0xBD => 0x2D,                                 // - (XK_minus)
+        0xBE => 0x2E,                                 // . (XK_period)
+        0xBF => 0x2F,                                 // / (XK_slash)
+        0xC0 => 0x60,                                 // `~ (XK_grave)
+        0xDB => 0x5B,                                 // [{ (XK_bracketleft)
+        0xDC => 0x5C,                                 // \| (XK_backslash)
+        0xDD => 0x5D,                                 // ]} (XK_bracketright)
+        0xDE => 0x27,                                 // '" (XK_apostrophe)
+        0xDF => 0x5F,                                 // VK_OEM_8 varies by layout; treat as underscore
+        _ => return None,
+    })
 }
 
 fn setup_x11_hotkey(
@@ -205,13 +284,12 @@ fn setup_x11_hotkey(
         };
         let screen = &conn.setup().roots[screen_num];
 
+        let keysym = match vk_to_keysym(hk.vk) {
+            Some(ks) => ks,
+            None => return,
+        };
+
         let keycode = {
-            let key_str = hk.vk;
-            let keysym = match key_str as u8 {
-                b'A'..=b'Z' => key_str as u32,
-                b'0'..=b'9' => 0x30 + (u32::from(key_str) - u32::from(b'0')),
-                _ => return,
-            };
             let min_kc = conn.setup().min_keycode;
             let max_kc = conn.setup().max_keycode;
             let keycodes = match conn.get_keyboard_mapping(min_kc, max_kc - min_kc + 1) {
@@ -384,10 +462,10 @@ pub fn run() {
     let window = match event_loop.create_window(
         Window::default_attributes()
             .with_title("ZeroIn")
-            .with_fullscreen(Some(Fullscreen::Borderless(None)))
+            .with_visible(false)
             .with_transparent(true)
             .with_decorations(false)
-            .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_active(false)
     ) {
         Ok(w) => w,
         Err(e) => {
@@ -396,29 +474,45 @@ pub fn run() {
         }
     };
 
+    // Position to cover primary monitor (not fullscreen, so set_cursor_hittest works)
+    if let Some(monitor) = window.primary_monitor() {
+        let pos = monitor.position();
+        window.set_outer_position(pos);
+        let size = monitor.size();
+        let _ = window.request_inner_size(size);
+    }
+
+    // set hittest before mapping; window_level must be set after mapping
+    window.set_cursor_hittest(false).unwrap();
+    window.set_cursor(CursorIcon::Crosshair);
+
     let window_size = window.inner_size();
     let window = Rc::new(window);
 
-    let context = match unsafe { softbuffer::Context::new(Rc::clone(&window)) } {
+    let context = match softbuffer::Context::new(Rc::clone(&window)) {
         Ok(ctx) => ctx,
         Err(e) => {
             eprintln!("ZeroIn: failed to create softbuffer context: {e}");
             return;
         }
     };
-    let mut surface = match unsafe { Surface::new(&context, Rc::clone(&window)) } {
+    let mut surface = match softbuffer::Surface::new(&context, Rc::clone(&window)) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("ZeroIn: failed to create softbuffer surface: {e}");
             return;
         }
     };
+    // Initial resize of softbuffer surface
+    if let (Some(w), Some(h)) = (NonZeroU32::new(window_size.width), NonZeroU32::new(window_size.height)) {
+        let _ = surface.resize(w, h);
+    }
 
     let config = Config::load();
     let app = Rc::new(RefCell::new(App {
         config: config.clone(),
         crosshair_type: config.crosshair_type,
-        visible: false,
+        visible: true,
         config_mtime: config_mtime(),
         profiles: crate::profiles::Profiles::load(),
         png_pixels: if config.png_crosshair.as_ref().map_or(false, |p| !p.is_empty()) {
@@ -429,39 +523,17 @@ pub fn run() {
         window_size,
     }));
 
-    let tray_icon = try_load_tray_icon();
-    let mut tray_builder = TrayIconBuilder::new().with_tooltip("ZeroIn Crosshair");
-    if let Some(icon) = tray_icon {
-        tray_builder = tray_builder.with_icon(icon);
-    }
+    let profile_names: Vec<String> = app.borrow().profiles.list.iter().map(|p| p.name.clone()).collect();
+    let tray_icon_bytes = try_load_tray_icon();
 
-    let (tray_menu_set, tray_menu) = build_tray_menu(&app);
-    tray_builder = tray_builder.with_menu(Box::new(tray_menu));
-    let _tray_icon = tray_builder.build();
+    // Spawn GTK thread: init GTK, create menu items, build tray icon, pump events
+    let (tray_menu_ids, cmd_tx) = load_tray_ids_and_spawn_gtk(profile_names, tray_icon_bytes);
+
+    cmd_tx.send(TrayCommand::SetToggleChecked(true)).ok();
+    window.set_visible(true);
+    window.set_window_level(WindowLevel::AlwaysOnTop);
+
     let menu_receiver = MenuEvent::receiver();
-
-    // Make window click-through on X11 via Shape extension
-    if let Ok(handle) = window.window_handle() {
-        let raw = handle.as_raw();
-        let xid = match raw {
-            RawWindowHandle::Xlib(h) => h.window,
-            RawWindowHandle::Xcb(h) => h.window.get() as u64,
-            _ => 0,
-        };
-        if xid != 0 {
-            if let Ok((shape_conn, _)) = x11rb::connect(None) {
-                let _ = shape_conn.shape_rectangles(
-                    x11rb::protocol::shape::SO::SET,
-                    x11rb::protocol::shape::SK::INPUT,
-                    x11rb::protocol::xproto::ClipOrdering::UNSORTED,
-                    xid as u32,
-                    0i16, 0i16,
-                    &[],
-                );
-                let _ = shape_conn.flush();
-            }
-        }
-    }
 
     // X11 hotkey thread (best-effort)
     let hk_proxy = proxy.clone();
@@ -479,7 +551,7 @@ pub fn run() {
             let mut app = app.borrow_mut();
             let id = menu_event.id;
 
-            if id == tray_menu_set.toggle.id() {
+            if id == tray_menu_ids.toggle_id {
                 app.visible = !app.visible;
                 if app.visible {
                     // Re-check config on show
@@ -495,23 +567,23 @@ pub fn run() {
                 } else {
                     window.set_visible(false);
                 }
-                tray_menu_set.toggle.set_checked(app.visible);
+                cmd_tx.send(TrayCommand::SetToggleChecked(app.visible)).ok();
                 continue;
             }
 
-            if id == tray_menu_set.exit_item.id() {
+            if id == tray_menu_ids.exit_id {
                 elwt.exit();
                 continue;
             }
 
-            if id == tray_menu_set.save_current.id() {
+            if id == tray_menu_ids.save_current_id {
                 let config = app.config.clone();
                 app.profiles.copy_config_to_current(&config);
                 app.profiles.save_to_disk();
                 continue;
             }
 
-            if id == tray_menu_set.save_new.id() {
+            if id == tray_menu_ids.save_new_id {
                 let name = profile_timestamp_name();
                 let profile = crate::profiles::Profile::from_config(name, &app.config);
                 app.profiles.list.push(profile);
@@ -520,7 +592,7 @@ pub fn run() {
                 continue;
             }
 
-            if id == tray_menu_set.reload_profiles.id() {
+            if id == tray_menu_ids.reload_profiles_id {
                 let current_name = app.profiles.current.and_then(|i| app.profiles.list.get(i)).map(|p| p.name.clone());
                 app.profiles = crate::profiles::Profiles::load();
                 app.profiles.current = current_name.as_ref().and_then(|n| app.profiles.current_index_by_name(n));
@@ -528,34 +600,33 @@ pub fn run() {
             }
 
             // Check crosshair type items
-            for (type_idx, item) in tray_menu_set.type_items.iter().enumerate() {
-                if id == item.id() {
-                    // Map index to CrosshairType
-                    let types = [
-                        CrosshairType::Dot,
-                        CrosshairType::Cross,
-                        CrosshairType::T,
-                        CrosshairType::Circle,
-                        CrosshairType::Diamond,
-                        CrosshairType::Arrow,
-                    ];
-                    if type_idx < types.len() {
-                        app.crosshair_type = types[type_idx];
-                        app.config.png_crosshair = None;
-                        app.png_pixels = None;
-                        if app.visible { window.request_redraw(); }
-                    }
-                    break;
+            let mut type_hit = None;
+            for (type_idx, tid) in tray_menu_ids.type_ids.iter().enumerate() {
+                if id == *tid { type_hit = Some(type_idx); break; }
+            }
+            if let Some(type_idx) = type_hit {
+                let types = [
+                    CrosshairType::Dot,
+                    CrosshairType::Cross,
+                    CrosshairType::T,
+                    CrosshairType::Circle,
+                    CrosshairType::Diamond,
+                    CrosshairType::Arrow,
+                ];
+                if type_idx < types.len() {
+                    app.crosshair_type = types[type_idx];
+                    app.config.png_crosshair = None;
+                    app.png_pixels = None;
+                    if app.visible { window.request_redraw(); }
                 }
             }
 
-            // Check opacity items
-            for (opi_idx, item) in tray_menu_set.opacity_items.iter().enumerate() {
-                if id == item.id() {
-                    if opi_idx < OPACITY_PRESETS.len() {
-                        app.config.opacity = OPACITY_PRESETS[opi_idx];
-                        if app.visible { window.request_redraw(); }
-                    }
+            // Check opacity items (radio behavior: uncheck all, then check selected)
+            for (opi_idx, oid) in tray_menu_ids.opacity_ids.iter().enumerate() {
+                if id == *oid && opi_idx < OPACITY_PRESETS.len() {
+                    cmd_tx.send(TrayCommand::OpacityRadio(opi_idx)).ok();
+                    app.config.opacity = OPACITY_PRESETS[opi_idx];
+                    if app.visible { window.request_redraw(); }
                     break;
                 }
             }
@@ -566,6 +637,9 @@ pub fn run() {
                 WindowEvent::Resized(size) => {
                     app.borrow_mut().window_size = size;
                     sw_canvas = SwCanvas::new(size.width, size.height);
+                    if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
+                        let _ = surface.resize(w, h);
+                    }
                     if app.borrow().visible {
                         window.request_redraw();
                     }
@@ -611,6 +685,10 @@ pub fn run() {
                     }
 
                     // Copy SwCanvas pixels to softbuffer surface
+                    let (bw, bh) = (sw_canvas.width(), sw_canvas.height());
+                    if let (Some(w), Some(h)) = (NonZeroU32::new(bw), NonZeroU32::new(bh)) {
+                        let _ = surface.resize(w, h);
+                    }
                     if let Ok(mut buffer) = surface.buffer_mut() {
                         let src = sw_canvas.pixels();
                         let count = buffer.len().min(src.len());
@@ -642,7 +720,7 @@ pub fn run() {
                 } else {
                     window.set_visible(false);
                 }
-                tray_menu_set.toggle.set_checked(app.visible);
+                cmd_tx.send(TrayCommand::SetToggleChecked(app.visible)).ok();
             }
             Event::AboutToWait => {
                 // Config polling every 2 seconds

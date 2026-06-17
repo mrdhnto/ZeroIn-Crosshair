@@ -40,8 +40,8 @@ jobs:
             libasound2-dev \
             libgtk-3-dev
           # tray-icon may use libappindicator (fails on Ubuntu >=24.04, fallback to libayatana)
-          sudo apt-get install -y libappindicator-dev 2>/dev/null \
-            || sudo apt-get install -y libayatana-appindicator-dev
+          sudo apt-get install -y libappindicator3-dev 2>/dev/null \
+            || sudo apt-get install -y libayatana-appindicator3-dev
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable

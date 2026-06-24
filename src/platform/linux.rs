@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
 use winit::window::{CursorIcon, WindowLevel, Window};
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
@@ -20,14 +20,30 @@ use crate::crosshair;
 
 const OPACITY_PRESETS: [f32; 6] = [0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
 
+struct MonitorInfo {
+    index: u32,
+    name: String,
+    position: winit::dpi::PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
+}
+
+struct OverlayWindow {
+    window: Rc<Window>,
+    surface: softbuffer::Surface<OwnedDisplayHandle, Rc<Window>>,
+    sw_canvas: SwCanvas,
+    png_pixels: Option<(Vec<u8>, u32, u32)>,
+    window_size: PhysicalSize<u32>,
+    monitor_index: u32,
+    monitor_name: String,
+}
+
 struct App {
     config: Config,
     crosshair_type: CrosshairType,
     visible: bool,
     config_mtime: Option<SystemTime>,
     profiles: crate::profiles::Profiles,
-    png_pixels: Option<(Vec<u8>, u32, u32)>,
-    window_size: PhysicalSize<u32>,
+    overlays: Vec<OverlayWindow>,
 }
 
 enum UserEvent {
@@ -80,7 +96,6 @@ fn load_png_pixels(config: &Config) -> Option<(Vec<u8>, u32, u32)> {
     if w == 0 || h == 0 {
         return None;
     }
-    // Premultiply alpha and convert to BGRA
     let pixels: Vec<u8> = rgba.chunks(4).flat_map(|p| {
         let r = p[0] as u32;
         let g = p[1] as u32;
@@ -97,7 +112,6 @@ fn load_png_pixels(config: &Config) -> Option<(Vec<u8>, u32, u32)> {
 }
 
 fn try_load_tray_icon() -> Option<tray_icon::Icon> {
-    // Try embedded icon first (compile-time)
     let embedded = include_bytes!("../../icon.png");
     if let Ok(img) = image::load_from_memory(embedded) {
         let rgba = img.to_rgba8();
@@ -108,8 +122,6 @@ fn try_load_tray_icon() -> Option<tray_icon::Icon> {
             }
         }
     }
-
-    // Fallback to file lookup
     let paths = ["focus.png", "icon.png", "new-icon.png"];
     for name in &paths {
         let path = exe_dir().join(name);
@@ -134,15 +146,20 @@ struct TrayMenuIds {
     save_new_id: MenuId,
     reload_profiles_id: MenuId,
     exit_id: MenuId,
+    mirror_id: MenuId,
+    monitor_ids: Vec<MenuId>,
 }
 
 enum TrayCommand {
     SetToggleChecked(bool),
     OpacityRadio(usize),
+    SetMirrorChecked(bool),
+    SetMonitorChecked(Option<usize>),
 }
 
 fn load_tray_ids_and_spawn_gtk(
     profile_names: Vec<String>,
+    monitor_names: Vec<(u32, String)>,
     icon: Option<tray_icon::Icon>,
 ) -> (TrayMenuIds, std::sync::mpsc::Sender<TrayCommand>) {
     let (id_tx, id_rx) = std::sync::mpsc::channel();
@@ -164,6 +181,14 @@ fn load_tray_ids_and_spawn_gtk(
             let reload_profiles = MenuItem::new("Reload Profiles", true, None);
             let exit_item = MenuItem::new("Exit", true, None);
 
+            // Monitor submenu
+            let mirror_toggle = CheckMenuItem::new("Mirror All Monitors", true, false, None);
+            let mut monitor_items: Vec<CheckMenuItem> = Vec::new();
+            for &(ref _idx, ref name) in &monitor_names {
+                let item = CheckMenuItem::new(name, true, false, None);
+                monitor_items.push(item);
+            }
+
             let ids = TrayMenuIds {
                 toggle_id: toggle.id().clone(),
                 type_ids: type_items.iter().map(|i| i.id().clone()).collect(),
@@ -172,6 +197,8 @@ fn load_tray_ids_and_spawn_gtk(
                 save_new_id: save_new.id().clone(),
                 reload_profiles_id: reload_profiles.id().clone(),
                 exit_id: exit_item.id().clone(),
+                mirror_id: mirror_toggle.id().clone(),
+                monitor_ids: monitor_items.iter().map(|i| i.id().clone()).collect(),
             };
 
             let menu = Menu::new();
@@ -190,6 +217,16 @@ fn load_tray_ids_and_spawn_gtk(
                 opacity_submenu.append(item).unwrap();
             }
             menu.append(&opacity_submenu).unwrap();
+            menu.append(&PredefinedMenuItem::separator()).unwrap();
+
+            // Monitor submenu
+            let monitor_submenu = Submenu::new("Monitor", true);
+            monitor_submenu.append(&mirror_toggle).unwrap();
+            monitor_submenu.append(&PredefinedMenuItem::separator()).unwrap();
+            for item in &monitor_items {
+                monitor_submenu.append(item).unwrap();
+            }
+            menu.append(&monitor_submenu).unwrap();
             menu.append(&PredefinedMenuItem::separator()).unwrap();
 
             let profiles_submenu = Submenu::new("Profiles", true);
@@ -223,6 +260,12 @@ fn load_tray_ids_and_spawn_gtk(
                                 item.set_checked(i == idx);
                             }
                         }
+                        TrayCommand::SetMirrorChecked(v) => mirror_toggle.set_checked(v),
+                        TrayCommand::SetMonitorChecked(opt) => {
+                            for (i, item) in monitor_items.iter().enumerate() {
+                                item.set_checked(Some(i) == opt);
+                            }
+                        }
                     }
                 }
                 std::thread::yield_now();
@@ -235,38 +278,37 @@ fn load_tray_ids_and_spawn_gtk(
 }
 
 fn vk_to_keysym(vk: u16) -> Option<u32> {
-    // Map Windows virtual-key codes to X11 keysyms
     Some(match vk {
-        0x41..=0x5A => vk as u32,                    // A-Z
-        0x30..=0x39 => vk as u32,                    // 0-9
-        0x20 => 0x20,                                 // Space
-        0x0D => 0xFF0D,                               // Return (XK_Return)
-        0x09 => 0xFF09,                               // Tab (XK_Tab)
-        0x1B => 0xFF1B,                               // Escape (XK_Escape)
-        0x08 => 0xFF08,                               // Backspace (XK_BackSpace)
-        0x2E => 0xFFFF,                               // Delete (XK_Delete)
-        0x2D => 0xFF63,                               // Insert (XK_Insert)
-        0x24 => 0xFF50,                               // Home (XK_Home)
-        0x23 => 0xFF57,                               // End (XK_End)
-        0x21 => 0xFF55,                               // Page Up (XK_Page_Up)
-        0x22 => 0xFF56,                               // Page Down (XK_Page_Down)
-        0x25 => 0xFF51,                               // Left (XK_Left)
-        0x27 => 0xFF53,                               // Right (XK_Right)
-        0x26 => 0xFF52,                               // Up (XK_Up)
-        0x28 => 0xFF54,                               // Down (XK_Down)
-        0x70..=0x87 => 0xFFBE + (vk - 0x70) as u32,   // F1-F24
-        0xBA => 0x3B,                                 // ;: (XK_semicolon)
-        0xBB => 0x3D,                                 // =+ (XK_equal)
-        0xBC => 0x2C,                                 // , (XK_comma)
-        0xBD => 0x2D,                                 // - (XK_minus)
-        0xBE => 0x2E,                                 // . (XK_period)
-        0xBF => 0x2F,                                 // / (XK_slash)
-        0xC0 => 0x60,                                 // `~ (XK_grave)
-        0xDB => 0x5B,                                 // [{ (XK_bracketleft)
-        0xDC => 0x5C,                                 // \| (XK_backslash)
-        0xDD => 0x5D,                                 // ]} (XK_bracketright)
-        0xDE => 0x27,                                 // '" (XK_apostrophe)
-        0xDF => 0x5F,                                 // VK_OEM_8 varies by layout; treat as underscore
+        0x41..=0x5A => vk as u32,
+        0x30..=0x39 => vk as u32,
+        0x20 => 0x20,
+        0x0D => 0xFF0D,
+        0x09 => 0xFF09,
+        0x1B => 0xFF1B,
+        0x08 => 0xFF08,
+        0x2E => 0xFFFF,
+        0x2D => 0xFF63,
+        0x24 => 0xFF50,
+        0x23 => 0xFF57,
+        0x21 => 0xFF55,
+        0x22 => 0xFF56,
+        0x25 => 0xFF51,
+        0x27 => 0xFF53,
+        0x26 => 0xFF52,
+        0x28 => 0xFF54,
+        0x70..=0x87 => 0xFFBE + (vk - 0x70) as u32,
+        0xBA => 0x3B,
+        0xBB => 0x3D,
+        0xBC => 0x2C,
+        0xBD => 0x2D,
+        0xBE => 0x2E,
+        0xBF => 0x2F,
+        0xC0 => 0x60,
+        0xDB => 0x5B,
+        0xDC => 0x5C,
+        0xDD => 0x5D,
+        0xDE => 0x27,
+        0xDF => 0x5F,
         _ => return None,
     })
 }
@@ -313,15 +355,12 @@ fn setup_x11_hotkey(
             }
         };
 
-        // Map Win32 MOD_* to X11 modifier masks
-        // MOD_ALT=1 → Mod1Mask=8, MOD_CONTROL=2 → ControlMask=4,
-        // MOD_SHIFT=4 → ShiftMask=1, MOD_WIN=8 → Mod4Mask=64
         let mut x11_mod: u32 = 0;
         let m = hk.modifiers;
-        if m & 0x0001 != 0 { x11_mod |= 8; }   // MOD_ALT → Mod1Mask
-        if m & 0x0002 != 0 { x11_mod |= 4; }   // MOD_CONTROL → ControlMask
-        if m & 0x0004 != 0 { x11_mod |= 1; }   // MOD_SHIFT → ShiftMask
-        if m & 0x0008 != 0 { x11_mod |= 64; }  // MOD_WIN → Mod4Mask
+        if m & 0x0001 != 0 { x11_mod |= 8; }
+        if m & 0x0002 != 0 { x11_mod |= 4; }
+        if m & 0x0004 != 0 { x11_mod |= 1; }
+        if m & 0x0008 != 0 { x11_mod |= 64; }
 
         if conn.grab_key(
             false,
@@ -351,30 +390,72 @@ fn setup_x11_hotkey(
     Some(handle)
 }
 
-fn render(app: &App, canvas: &mut dyn Canvas) {
-    let (rr, gg, bb) = app.config.parse_color();
-    let alpha = app.config.opacity;
+fn render_overlay(ov: &mut OverlayWindow, cfg: &Config, ctype: CrosshairType) {
+    ov.sw_canvas.clear();
+    let (w, h) = (ov.sw_canvas.width(), ov.sw_canvas.height());
+    if w == 0 || h == 0 { return; }
+
+    let (rr, gg, bb) = cfg.parse_color();
+    let alpha = cfg.opacity;
     let main_color = (rr, gg, bb, alpha);
     let border_color = (0.0, 0.0, 0.0, 0.5 * alpha);
-    let w = canvas.width() as f32;
-    let h = canvas.height() as f32;
-    let cx = w / 2.0;
-    let cy = h / 2.0;
-    let scale = 1.0; // winit provides scaled size
+    let cx = w as f32 / 2.0 + cfg.adjust_x;
+    let cy = h as f32 / 2.0 + cfg.adjust_y;
+    let scale = 1.0;
 
-    crosshair::draw(
-        canvas, main_color, Some(border_color),
-        app.crosshair_type, cx, cy,
-        app.config.size * scale,
-        app.config.thickness_h * scale,
-        app.config.thickness_v * scale,
-        app.config.dot_center,
-        app.config.border,
-        app.config.border_size * scale,
-        app.config.space_width * scale,
-        app.config.rotation,
-        app.config.dot_size,
-    );
+    let using_png = cfg.png_crosshair.as_ref().map_or(false, |p| !p.is_empty());
+    if using_png {
+        if ov.png_pixels.is_none() {
+            ov.png_pixels = load_png_pixels(cfg);
+        }
+        if let Some((ref pixels, img_w, img_h)) = ov.png_pixels.clone() {
+            let target_size = cfg.size * scale;
+            let aspect = img_h as f32 / img_w as f32;
+            let draw_w = target_size;
+            let draw_h = target_size * aspect;
+            let rotation = cfg.rotation.to_radians();
+
+            if rotation != 0.0 {
+                ov.sw_canvas.begin_rotation(rotation, cx, cy);
+            }
+
+            let left = cx - draw_w / 2.0;
+            let top = cy - draw_h / 2.0;
+            blit_png_to_swcanvas(&mut ov.sw_canvas, pixels, img_w, img_h,
+                                  left, top, draw_w, draw_h, cfg.opacity);
+
+            if rotation != 0.0 {
+                ov.sw_canvas.end_rotation();
+            }
+        }
+    } else {
+        crosshair::draw(
+            &mut ov.sw_canvas, main_color, Some(border_color), ctype, cx, cy,
+            cfg.size * scale,
+            cfg.thickness_h * scale,
+            cfg.thickness_v * scale,
+            cfg.dot_center,
+            cfg.border,
+            cfg.border_size * scale,
+            cfg.space_width * scale,
+            cfg.rotation,
+            cfg.dot_size,
+        );
+    }
+
+    let (bw, bh) = (ov.sw_canvas.width(), ov.sw_canvas.height());
+    if let (Some(nw), Some(nh)) = (NonZeroU32::new(bw), NonZeroU32::new(bh)) {
+        let _ = ov.surface.resize(nw, nh);
+    }
+    if let Ok(mut buffer) = ov.surface.buffer_mut() {
+        let src = ov.sw_canvas.pixels();
+        let count = buffer.len().min(src.len());
+        buffer[..count].copy_from_slice(&src[..count]);
+        if buffer.len() > src.len() {
+            buffer[src.len()..].fill(0);
+        }
+        let _ = buffer.present();
+    }
 }
 
 fn blit_png_to_swcanvas(sw: &mut SwCanvas, pixels: &[u8], img_w: u32, img_h: u32,
@@ -415,7 +496,6 @@ fn blit_png_to_swcanvas(sw: &mut SwCanvas, pixels: &[u8], img_w: u32, img_h: u32
             let row1 = lerp_pixel(p01, p11, fx, fx_inv);
             let sampled = lerp_pixel(row0, row1, fy, fy_inv);
 
-            // Apply opacity to premultiplied pixel
             let a = ((sampled >> 24) as f32 * opacity) as u32;
             let r = (((sampled >> 16) & 0xFF) as f32 * opacity) as u32;
             let g = (((sampled >> 8) & 0xFF) as f32 * opacity) as u32;
@@ -449,6 +529,93 @@ fn lerp_pixel(a: u32, b: u32, t: u32, inv: u32) -> u32 {
     (oa << 24) | (or_ << 16) | (og << 8) | ob
 }
 
+fn enumerate_monitors(window: &Window) -> Vec<MonitorInfo> {
+    let primary = window.primary_monitor();
+    window.available_monitors()
+        .enumerate()
+        .map(|(i, m)| {
+            let is_primary = primary.as_ref().map_or(false, |p| p == &m);
+            MonitorInfo {
+                index: i as u32,
+                name: if is_primary {
+                    format!("Monitor {i} (Primary)")
+                } else {
+                    format!("Monitor {i}")
+                },
+                position: m.position(),
+                size: m.size(),
+            }
+        })
+        .collect()
+}
+
+fn determine_targets<'a>(config: &Config, monitors: &'a [MonitorInfo]) -> Vec<&'a MonitorInfo> {
+    if monitors.is_empty() {
+        return Vec::new();
+    }
+    if config.mirror_crosshair {
+        monitors.iter().collect()
+    } else {
+        let idx = (config.set_monitor as usize).min(monitors.len().saturating_sub(1));
+        vec![&monitors[idx]]
+    }
+}
+
+fn create_overlays(
+    el: &EventLoop<UserEvent>,
+    monitors: &[MonitorInfo],
+    config: &Config,
+) -> Option<(Vec<OverlayWindow>, softbuffer::Context<OwnedDisplayHandle>)> {
+    let targets = determine_targets(config, monitors);
+    if targets.is_empty() {
+        return None;
+    }
+
+    let mut overlays: Vec<OverlayWindow> = Vec::new();
+    let mut context: Option<softbuffer::Context<OwnedDisplayHandle>> = None;
+
+    for (_idx, mon) in targets.iter().enumerate() {
+        let raw = el.create_window(
+            Window::default_attributes()
+                .with_title("ZeroIn")
+                .with_visible(false)
+                .with_transparent(true)
+                .with_decorations(false)
+                .with_active(false)
+        ).ok()?;
+
+        raw.set_outer_position(mon.position);
+        let _ = raw.request_inner_size(mon.size);
+        raw.set_cursor_hittest(false).ok()?;
+        raw.set_cursor(CursorIcon::Crosshair);
+
+        let window = Rc::new(raw);
+
+        if context.is_none() {
+            let display = el.owned_display_handle();
+            context = Some(softbuffer::Context::new(display).ok()?);
+        }
+        let mut surface = softbuffer::Surface::new(context.as_ref().unwrap(), Rc::clone(&window)).ok()?;
+        if let (Some(w), Some(h)) = (NonZeroU32::new(mon.size.width), NonZeroU32::new(mon.size.height)) {
+            let _ = surface.resize(w, h);
+        }
+
+        let sw_canvas = SwCanvas::new(mon.size.width, mon.size.height);
+
+        overlays.push(OverlayWindow {
+            window,
+            surface,
+            sw_canvas,
+            png_pixels: None,
+            window_size: mon.size,
+            monitor_index: mon.index,
+            monitor_name: mon.name.clone(),
+        });
+    }
+
+    Some((overlays, context.unwrap()))
+}
+
 pub fn run() {
     let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
         Ok(el) => el,
@@ -459,89 +626,86 @@ pub fn run() {
     };
     let proxy = event_loop.create_proxy();
 
-    let window = match event_loop.create_window(
+    let config = Config::load();
+
+    // Create a temporary window to enumerate monitors
+    let temp_window = match event_loop.create_window(
         Window::default_attributes()
-            .with_title("ZeroIn")
             .with_visible(false)
             .with_transparent(true)
             .with_decorations(false)
-            .with_active(false)
     ) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("ZeroIn: failed to create window: {e}");
+            eprintln!("ZeroIn: failed to create temp window: {e}");
             return;
         }
     };
 
-    // Position to cover primary monitor (not fullscreen, so set_cursor_hittest works)
-    if let Some(monitor) = window.primary_monitor() {
-        let pos = monitor.position();
-        window.set_outer_position(pos);
-        let size = monitor.size();
-        let _ = window.request_inner_size(size);
+    let monitors = enumerate_monitors(&temp_window);
+    // Drop temp window — it was only for monitor enumeration
+    drop(temp_window);
+
+    if monitors.is_empty() {
+        eprintln!("ZeroIn: no monitors found");
+        return;
     }
 
-    // set hittest before mapping; window_level must be set after mapping
-    window.set_cursor_hittest(false).unwrap();
-    window.set_cursor(CursorIcon::Crosshair);
-
-    let window_size = window.inner_size();
-    let window = Rc::new(window);
-
-    let context = match softbuffer::Context::new(Rc::clone(&window)) {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            eprintln!("ZeroIn: failed to create softbuffer context: {e}");
+    let (overlays, _context) = match create_overlays(&event_loop, &monitors, &config) {
+        Some(v) => v,
+        None => {
+            eprintln!("ZeroIn: failed to create overlay windows");
             return;
         }
     };
-    let mut surface = match softbuffer::Surface::new(&context, Rc::clone(&window)) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("ZeroIn: failed to create softbuffer surface: {e}");
-            return;
-        }
-    };
-    // Initial resize of softbuffer surface
-    if let (Some(w), Some(h)) = (NonZeroU32::new(window_size.width), NonZeroU32::new(window_size.height)) {
-        let _ = surface.resize(w, h);
-    }
 
-    let config = Config::load();
     let app = Rc::new(RefCell::new(App {
         config: config.clone(),
         crosshair_type: config.crosshair_type,
         visible: true,
         config_mtime: config_mtime(),
         profiles: crate::profiles::Profiles::load(),
-        png_pixels: if config.png_crosshair.as_ref().map_or(false, |p| !p.is_empty()) {
-            load_png_pixels(&config)
-        } else {
-            None
-        },
-        window_size,
+        overlays,
     }));
 
     let profile_names: Vec<String> = app.borrow().profiles.list.iter().map(|p| p.name.clone()).collect();
+    let monitor_names: Vec<(u32, String)> = monitors.iter().map(|m| (m.index, m.name.clone())).collect();
     let tray_icon_bytes = try_load_tray_icon();
 
-    // Spawn GTK thread: init GTK, create menu items, build tray icon, pump events
-    let (tray_menu_ids, cmd_tx) = load_tray_ids_and_spawn_gtk(profile_names, tray_icon_bytes);
+    let (tray_menu_ids, cmd_tx) = load_tray_ids_and_spawn_gtk(profile_names, monitor_names, tray_icon_bytes);
 
+    // Show all overlays
+    {
+        let app_borrow = app.borrow();
+        for ov in &app_borrow.overlays {
+            ov.window.set_visible(true);
+            ov.window.set_window_level(WindowLevel::AlwaysOnTop);
+        }
+    }
+
+    // Initial tray state
+    if config.mirror_crosshair {
+        cmd_tx.send(TrayCommand::SetMirrorChecked(true)).ok();
+    } else {
+        cmd_tx.send(TrayCommand::SetMonitorChecked(Some(config.set_monitor as usize))).ok();
+    }
     cmd_tx.send(TrayCommand::SetToggleChecked(true)).ok();
-    window.set_visible(true);
-    window.set_window_level(WindowLevel::AlwaysOnTop);
+
+    // Request redraw for all overlays initially
+    {
+        let app_borrow = app.borrow();
+        for ov in &app_borrow.overlays {
+            ov.window.request_redraw();
+        }
+    }
 
     let menu_receiver = MenuEvent::receiver();
 
-    // X11 hotkey thread (best-effort)
     let hk_proxy = proxy.clone();
     let hk_cfg = config.clone();
     let _hotkey_handle = setup_x11_hotkey(&hk_cfg, hk_proxy);
 
     let mut last_config_check = Instant::now();
-    let mut sw_canvas = SwCanvas::new(window_size.width, window_size.height);
 
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Poll);
@@ -554,18 +718,17 @@ pub fn run() {
             if id == tray_menu_ids.toggle_id {
                 app.visible = !app.visible;
                 if app.visible {
-                    // Re-check config on show
                     app.config = Config::load();
                     app.crosshair_type = app.config.crosshair_type;
-                    app.png_pixels = if app.config.png_crosshair.as_ref().map_or(false, |p| !p.is_empty()) {
-                        load_png_pixels(&app.config)
-                    } else {
-                        None
-                    };
-                    window.set_visible(true);
-                    window.request_redraw();
+                    let cfg = app.config.clone();
+                    clear_overlay_pngs(&mut app.overlays);
+                    reconcile_overlays(&mut app.overlays, &cfg, &monitors, elwt);
+                    show_all(&app.overlays);
+                    for ov in &app.overlays {
+                        ov.window.request_redraw();
+                    }
                 } else {
-                    window.set_visible(false);
+                    hide_all(&app.overlays);
                 }
                 cmd_tx.send(TrayCommand::SetToggleChecked(app.visible)).ok();
                 continue;
@@ -616,114 +779,120 @@ pub fn run() {
                 if type_idx < types.len() {
                     app.crosshair_type = types[type_idx];
                     app.config.png_crosshair = None;
-                    app.png_pixels = None;
-                    if app.visible { window.request_redraw(); }
+                    clear_overlay_pngs(&mut app.overlays);
+                    if app.visible {
+                        for ov in &app.overlays {
+                            ov.window.request_redraw();
+                        }
+                    }
                 }
             }
 
-            // Check opacity items (radio behavior: uncheck all, then check selected)
+            // Check opacity items
             for (opi_idx, oid) in tray_menu_ids.opacity_ids.iter().enumerate() {
                 if id == *oid && opi_idx < OPACITY_PRESETS.len() {
                     cmd_tx.send(TrayCommand::OpacityRadio(opi_idx)).ok();
                     app.config.opacity = OPACITY_PRESETS[opi_idx];
-                    if app.visible { window.request_redraw(); }
+                    if app.visible {
+                        for ov in &app.overlays {
+                            ov.window.request_redraw();
+                        }
+                    }
+                    break;
+                }
+            }
+
+            // Check mirror toggle
+            if id == tray_menu_ids.mirror_id {
+                app.config.mirror_crosshair = !app.config.mirror_crosshair;
+                let cfg = app.config.clone();
+                reconcile_overlays(&mut app.overlays, &cfg, &monitors, elwt);
+                clear_overlay_pngs(&mut app.overlays);
+                if app.visible {
+                    show_all(&app.overlays);
+                    for ov in &app.overlays {
+                        ov.window.request_redraw();
+                    }
+                }
+                if app.config.mirror_crosshair {
+                    cmd_tx.send(TrayCommand::SetMirrorChecked(true)).ok();
+                    cmd_tx.send(TrayCommand::SetMonitorChecked(None)).ok();
+                } else {
+                    cmd_tx.send(TrayCommand::SetMirrorChecked(false)).ok();
+                    cmd_tx.send(TrayCommand::SetMonitorChecked(Some(app.config.set_monitor as usize))).ok();
+                }
+                continue;
+            }
+
+            // Check monitor items
+            for (mon_idx, mid) in tray_menu_ids.monitor_ids.iter().enumerate() {
+                if id == *mid {
+                    app.config.mirror_crosshair = false;
+                    app.config.set_monitor = mon_idx as u32;
+                    let cfg = app.config.clone();
+                    reconcile_overlays(&mut app.overlays, &cfg, &monitors, elwt);
+                    clear_overlay_pngs(&mut app.overlays);
+                    if app.visible {
+                        show_all(&app.overlays);
+                        for ov in &app.overlays {
+                            ov.window.request_redraw();
+                        }
+                    }
+                    cmd_tx.send(TrayCommand::SetMirrorChecked(false)).ok();
+                    cmd_tx.send(TrayCommand::SetMonitorChecked(Some(mon_idx))).ok();
                     break;
                 }
             }
         }
 
         match event {
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::Resized(size) => {
-                    app.borrow_mut().window_size = size;
-                    sw_canvas = SwCanvas::new(size.width, size.height);
-                    if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
-                        let _ = surface.resize(w, h);
-                    }
-                    if app.borrow().visible {
-                        window.request_redraw();
-                    }
-                }
-                WindowEvent::RedrawRequested => {
-                    let mut app = app.borrow_mut();
-                    sw_canvas.clear();
+            Event::WindowEvent { window_id, event, .. } => {
+                let mut app = app.borrow_mut();
+                let ov_idx = app.overlays.iter().position(|ov| ov.window.id() == window_id);
+                let Some(ov_idx) = ov_idx else { return; };
 
-                    let (w, h) = (sw_canvas.width(), sw_canvas.height());
-                    let using_png = app.config.png_crosshair.as_ref().map_or(false, |p| !p.is_empty());
-
-                    if using_png {
-                        if app.png_pixels.is_none() {
-                            app.png_pixels = load_png_pixels(&app.config);
+                match event {
+                    WindowEvent::Resized(size) => {
+                        let visible = app.visible;
+                        let ov = &mut app.overlays[ov_idx];
+                        ov.window_size = size;
+                        ov.sw_canvas = SwCanvas::new(size.width, size.height);
+                        if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
+                            let _ = ov.surface.resize(w, h);
                         }
-                        if let Some((ref pixels, img_w, img_h)) = app.png_pixels.clone() {
-                            let cx = w as f32 / 2.0;
-                            let cy = h as f32 / 2.0;
-                            let target_size = app.config.size;
-                            let aspect = img_h as f32 / img_w as f32;
-                            let draw_w = target_size;
-                            let draw_h = target_size * aspect;
-                            let rotation = app.config.rotation.to_radians();
-
-                            if rotation != 0.0 {
-                                sw_canvas.begin_rotation(rotation, cx, cy);
-                            }
-
-                            // Direct pixel blit onto SwCanvas
-                            let left = cx - draw_w / 2.0;
-                            let top = cy - draw_h / 2.0;
-                            let opacity = app.config.opacity;
-                            // This will be done via raw buffer access
-                            blit_png_to_swcanvas(&mut sw_canvas, pixels, img_w, img_h,
-                                                  left, top, draw_w, draw_h, opacity);
-
-                            if rotation != 0.0 {
-                                sw_canvas.end_rotation();
-                            }
+                        if visible {
+                            ov.window.request_redraw();
                         }
-                    } else {
-                        render(&app, &mut sw_canvas);
                     }
-
-                    // Copy SwCanvas pixels to softbuffer surface
-                    let (bw, bh) = (sw_canvas.width(), sw_canvas.height());
-                    if let (Some(w), Some(h)) = (NonZeroU32::new(bw), NonZeroU32::new(bh)) {
-                        let _ = surface.resize(w, h);
+                    WindowEvent::RedrawRequested => {
+                        let cfg = app.config.clone();
+                        let ctype = app.crosshair_type;
+                        let ov = &mut app.overlays[ov_idx];
+                        render_overlay(ov, &cfg, ctype);
                     }
-                    if let Ok(mut buffer) = surface.buffer_mut() {
-                        let src = sw_canvas.pixels();
-                        let count = buffer.len().min(src.len());
-                        buffer[..count].copy_from_slice(&src[..count]);
-                        if buffer.len() > src.len() {
-                            buffer[src.len()..].fill(0);
-                        }
-                        let _ = buffer.present();
+                    WindowEvent::CloseRequested => {
+                        elwt.exit();
                     }
+                    _ => {}
                 }
-                WindowEvent::CloseRequested => {
-                    elwt.exit();
-                }
-                _ => {}
-            },
+            }
             Event::UserEvent(UserEvent::HotkeyPressed) => {
                 let mut app = app.borrow_mut();
                 app.visible = !app.visible;
                 if app.visible {
                     app.config = Config::load();
                     app.crosshair_type = app.config.crosshair_type;
-                    app.png_pixels = if app.config.png_crosshair.as_ref().map_or(false, |p| !p.is_empty()) {
-                        load_png_pixels(&app.config)
-                    } else {
-                        None
-                    };
-                    window.set_visible(true);
-                    window.request_redraw();
+                    clear_overlay_pngs(&mut app.overlays);
+                    show_all(&app.overlays);
+                    for ov in &app.overlays {
+                        ov.window.request_redraw();
+                    }
                 } else {
-                    window.set_visible(false);
+                    hide_all(&app.overlays);
                 }
                 cmd_tx.send(TrayCommand::SetToggleChecked(app.visible)).ok();
             }
             Event::AboutToWait => {
-                // Config polling every 2 seconds
                 let now = Instant::now();
                 if now.duration_since(last_config_check) >= Duration::from_secs(2) {
                     last_config_check = now;
@@ -733,13 +902,13 @@ pub fn run() {
                         app.config_mtime = new_mtime;
                         app.config = Config::load();
                         app.crosshair_type = app.config.crosshair_type;
-                        app.png_pixels = if app.config.png_crosshair.as_ref().map_or(false, |p| !p.is_empty()) {
-                            load_png_pixels(&app.config)
-                        } else {
-                            None
-                        };
+                        let cfg = app.config.clone();
+                        clear_overlay_pngs(&mut app.overlays);
                         if app.visible {
-                            window.request_redraw();
+                            reconcile_overlays(&mut app.overlays, &cfg, &monitors, elwt);
+                            for ov in &app.overlays {
+                                ov.window.request_redraw();
+                            }
                         }
                     }
                 }
@@ -747,4 +916,103 @@ pub fn run() {
             _ => {}
         }
     }).unwrap();
+}
+
+fn show_all(overlays: &[OverlayWindow]) {
+    for ov in overlays {
+        ov.window.set_visible(true);
+        ov.window.set_window_level(WindowLevel::AlwaysOnTop);
+    }
+}
+
+fn hide_all(overlays: &[OverlayWindow]) {
+    for ov in overlays {
+        ov.window.set_visible(false);
+    }
+}
+
+fn clear_overlay_pngs(overlays: &mut [OverlayWindow]) {
+    for ov in overlays.iter_mut() {
+        ov.png_pixels = None;
+    }
+}
+
+fn reconcile_overlays(
+    overlays: &mut Vec<OverlayWindow>,
+    config: &Config,
+    monitors: &[MonitorInfo],
+    elwt: &ActiveEventLoop,
+) {
+    let targets = determine_targets(config, monitors);
+    let needed = targets.len();
+
+    // Check if current overlays match needed config
+    let same = overlays.len() == needed
+        && if config.mirror_crosshair {
+            overlays.iter().zip(&targets).all(|(ov, t)| ov.monitor_index == t.index)
+        } else {
+            overlays.len() == 1 && targets.first().map_or(false, |t| overlays[0].monitor_index == t.index)
+        };
+
+    if same {
+        return;
+    }
+
+    // Need to rebuild
+    // Destroy old overlays
+    for ov in overlays.drain(..) {
+        ov.window.set_visible(false);
+    }
+
+    let mut new_context: Option<softbuffer::Context<OwnedDisplayHandle>> = None;
+
+    for target in &targets {
+        let raw = elwt.create_window(
+            Window::default_attributes()
+                .with_title("ZeroIn")
+                .with_visible(false)
+                .with_transparent(true)
+                .with_decorations(false)
+                .with_active(false)
+        );
+        let raw = match raw {
+            Ok(w) => w,
+            Err(_) => continue,
+        };
+
+        raw.set_outer_position(target.position);
+        let _ = raw.request_inner_size(target.size);
+        let _ = raw.set_cursor_hittest(false);
+        raw.set_cursor(CursorIcon::Crosshair);
+
+        let window = Rc::new(raw);
+
+        if new_context.is_none() {
+            let display = elwt.owned_display_handle();
+            new_context = Some(match softbuffer::Context::new(display) {
+                Ok(c) => c,
+                Err(_) => continue,
+            });
+        }
+        let mut surface = match softbuffer::Surface::new(new_context.as_ref().unwrap(), Rc::clone(&window)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if let (Some(w), Some(h)) = (NonZeroU32::new(target.size.width), NonZeroU32::new(target.size.height)) {
+            let _ = surface.resize(w, h);
+        }
+
+        let sw_canvas = SwCanvas::new(target.size.width, target.size.height);
+
+        overlays.push(OverlayWindow {
+            window,
+            surface,
+            sw_canvas,
+            png_pixels: None,
+            window_size: target.size,
+            monitor_index: target.index,
+            monitor_name: target.name.clone(),
+        });
+    }
+
 }

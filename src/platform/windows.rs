@@ -46,19 +46,28 @@ const IDM_PROFILE_SAVE: u16 = 2201;
 const IDM_PROFILE_SAVE_NEW: u16 = 2202;
 const IDM_PROFILE_RELOAD: u16 = 2203;
 
+const IDM_MIRROR_TOGGLE: u16 = 3001;
+const IDM_MONITOR_BASE: u16 = 3100;
+
 const OPACITY_PRESETS: [f32; 6] = [0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
 
-struct App {
-    overlay_hwnd: HWND,
-    factory: ID2D1Factory,
+struct OverlayWindow {
+    hwnd: HWND,
     rt: Option<RenderResources>,
+    png_bitmap: Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap>,
+    monitor_index: u32,
+    monitor_rect: RECT,
+}
+
+struct App {
+    overlays: Vec<OverlayWindow>,
+    factory: ID2D1Factory,
     config: Config,
     crosshair_type: CrosshairType,
     visible: bool,
     custom_icon: Option<HICON>,
     config_mtime: Option<std::time::SystemTime>,
     profiles: crate::profiles::Profiles,
-    png_bitmap: Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap>,
     tray_hwnd: HWND,
 }
 
@@ -68,6 +77,12 @@ struct RenderResources {
     dib: HBITMAP,
     width: u32,
     height: u32,
+}
+
+struct MonitorInfo {
+    index: u32,
+    rect: RECT,
+    name: String,
 }
 
 // ── Icon loading ────────────────────────────────────────────
@@ -180,39 +195,31 @@ fn run_impl() -> Result<()> {
             None, None, hinstance, None,
         )?;
 
-        let mon_rect = primary_monitor_rect();
-        let ow = mon_rect.right - mon_rect.left;
-        let oh = mon_rect.bottom - mon_rect.top;
-
-        let overlay_hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            oc.as_pcwstr(),
-            WStr::new("").as_pcwstr(),
-            WS_POPUP,
-            mon_rect.left, mon_rect.top, ow, oh,
-            None, None, hinstance, None,
-        )?;
-
         let factory: ID2D1Factory =
             D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
 
-        let app = Box::new(App {
-            overlay_hwnd,
+        let overlays = create_overlay_windows(&oc, hinstance, &cfg)?;
+        for ov in &overlays {
+            unsafe { ShowWindow(ov.hwnd, SW_HIDE) };
+        }
+
+        let mut app = Box::new(App {
+            overlays,
             factory,
-            rt: None,
             config: cfg.clone(),
             crosshair_type: cfg.crosshair_type,
             visible: false,
             custom_icon,
             config_mtime: config_mtime_of(&cfg),
             profiles: crate::profiles::Profiles::load(),
-            png_bitmap: None,
             tray_hwnd,
         });
-        let app_ptr = Box::into_raw(app);
 
-        SetWindowLongPtrW(tray_hwnd, GWLP_USERDATA, app_ptr as isize);
-        SetWindowLongPtrW(overlay_hwnd, GWLP_USERDATA, app_ptr as isize);
+        let app_ptr: *mut App = &mut *app;
+        for ov in &app.overlays {
+            unsafe { SetWindowLongPtrW(ov.hwnd, GWLP_USERDATA, app_ptr as isize) };
+        }
+        unsafe { SetWindowLongPtrW(tray_hwnd, GWLP_USERDATA, app_ptr as isize) };
 
         create_tray_icon(tray_hwnd, icon)?;
 
@@ -234,7 +241,8 @@ fn run_impl() -> Result<()> {
         }
 
         drop_tray_icon(tray_hwnd);
-        let _ = Box::from_raw(app_ptr);
+        destroy_overlays(&mut app.overlays);
+        drop(app);
         CoUninitialize();
         Ok(())
     }
@@ -247,15 +255,187 @@ unsafe fn app_mut(hwnd: HWND) -> &'static mut App {
     unsafe { &mut *ptr }
 }
 
-unsafe fn primary_monitor_rect() -> RECT {
-    let pt = POINT { x: 0, y: 0 };
-    let hm = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY) };
-    let mut mi = MONITORINFO {
-        cbSize: mem::size_of::<MONITORINFO>() as u32,
-        ..Default::default()
+unsafe extern "system" fn monitor_enum_proc(
+    hmonitor: HMONITOR,
+    _hdc: HDC,
+    _rect: *mut RECT,
+    lparam: LPARAM,
+) -> BOOL {
+    let monitors = unsafe { &mut *(lparam.0 as *mut Vec<MonitorInfo>) };
+    let mut mi = unsafe { mem::zeroed::<MONITORINFO>() };
+    mi.cbSize = mem::size_of::<MONITORINFO>() as u32;
+    if unsafe { GetMonitorInfoW(hmonitor, &mut mi).as_bool() } {
+        let idx = monitors.len() as u32;
+        monitors.push(MonitorInfo {
+            index: idx,
+            rect: mi.rcMonitor,
+            name: format!("Monitor {idx}"),
+        });
+    }
+    BOOL(1)
+}
+
+fn enumerate_monitors() -> Vec<MonitorInfo> {
+    let mut monitors = Vec::new();
+    unsafe {
+        EnumDisplayMonitors(
+            None,
+            None,
+            Some(monitor_enum_proc),
+            LPARAM(&mut monitors as *mut Vec<MonitorInfo> as isize),
+        );
+    }
+    monitors
+}
+
+fn create_overlay_windows(
+    oc: &WStr,
+    hinstance: HINSTANCE,
+    cfg: &Config,
+) -> Result<Vec<OverlayWindow>> {
+    let monitors = enumerate_monitors();
+    if monitors.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let targets: Vec<&MonitorInfo> = if cfg.mirror_crosshair {
+        monitors.iter().collect()
+    } else {
+        let idx = (cfg.set_monitor as usize).min(monitors.len().saturating_sub(1));
+        vec![&monitors[idx]]
     };
-    unsafe { GetMonitorInfoW(hm, &mut mi) };
-    mi.rcMonitor
+
+    let mut overlays = Vec::with_capacity(targets.len());
+    for &mon in &targets {
+        let ow = mon.rect.right - mon.rect.left;
+        let oh = mon.rect.bottom - mon.rect.top;
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                oc.as_pcwstr(),
+                WStr::new("").as_pcwstr(),
+                WS_POPUP,
+                mon.rect.left, mon.rect.top, ow, oh,
+                None, None, hinstance, None,
+            )
+        }?;
+        overlays.push(OverlayWindow {
+            hwnd,
+            rt: None,
+            png_bitmap: None,
+            monitor_index: mon.index,
+            monitor_rect: mon.rect,
+        });
+    }
+    Ok(overlays)
+}
+
+fn destroy_overlays(overlays: &mut Vec<OverlayWindow>) {
+    for ov in overlays.iter_mut() {
+        if let Some(rt) = ov.rt.take() {
+            if rt.width > 0 {
+                unsafe { SelectObject(rt.mem_dc, HGDIOBJ(rt.dib.0 as *mut core::ffi::c_void)) };
+            }
+            unsafe { DeleteObject(HGDIOBJ(rt.dib.0 as *mut core::ffi::c_void)) };
+            unsafe { DeleteDC(rt.mem_dc) };
+        }
+        if !ov.hwnd.is_invalid() {
+            unsafe { DestroyWindow(ov.hwnd) };
+        }
+    }
+    overlays.clear();
+}
+
+fn show_overlays(overlays: &[OverlayWindow]) {
+    for ov in overlays {
+        unsafe {
+            ShowWindow(ov.hwnd, SW_SHOW);
+            SetWindowPos(
+                ov.hwnd,
+                HWND_TOPMOST,
+                0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            );
+        }
+    }
+}
+
+fn hide_overlays(overlays: &[OverlayWindow]) {
+    for ov in overlays {
+        unsafe { ShowWindow(ov.hwnd, SW_HIDE) };
+    }
+}
+
+fn clear_overlay_bitmaps(overlays: &mut [OverlayWindow]) {
+    for ov in overlays.iter_mut() {
+        ov.png_bitmap = None;
+    }
+}
+
+fn reconcile_overlays(app: &mut App) {
+    let oc_name = WStr::new("CrosshairOverlayCls");
+    let monitors = enumerate_monitors();
+    if monitors.is_empty() { return; }
+
+    let needed_count = if app.config.mirror_crosshair {
+        monitors.len()
+    } else {
+        1usize
+    };
+
+    // If count matches and monitor indices match, keep current windows
+    let same = app.overlays.len() == needed_count
+        && if app.config.mirror_crosshair {
+            app.overlays.iter().zip(&monitors).all(|(ov, m)| ov.monitor_index == m.index)
+        } else {
+            let idx = (app.config.set_monitor as usize).min(monitors.len().saturating_sub(1));
+            app.overlays.len() == 1 && app.overlays[0].monitor_index == monitors[idx].index
+        };
+
+    if same {
+        // Just reposition existing windows
+        for ov in &mut app.overlays {
+            if let Some(m) = monitors.iter().find(|m| m.index == ov.monitor_index) {
+                ov.monitor_rect = m.rect;
+                unsafe {
+                    SetWindowPos(
+                        ov.hwnd,
+                        HWND_TOPMOST,
+                        m.rect.left, m.rect.top,
+                        m.rect.right - m.rect.left,
+                        m.rect.bottom - m.rect.top,
+                        SWP_NOZORDER,
+                    );
+                }
+            }
+        }
+        return;
+    }
+
+    // Need to recreate overlays
+    unsafe {
+        let hinstance: HINSTANCE = mem::transmute(GetModuleHandleW(None).unwrap_or(HMODULE::default()));
+        destroy_overlays(&mut app.overlays);
+
+        // Re-register overlay window class in case it was unregistered
+        let _ = RegisterClassW(&WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(overlay_wndproc),
+            hInstance: hinstance,
+            hIcon: HICON::default(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or(HCURSOR::default()),
+            hbrBackground: HBRUSH::default(),
+            lpszClassName: oc_name.as_pcwstr(),
+            ..Default::default()
+        });
+
+        let app_ptr = &mut *app as *mut App;
+        let new_overlays = create_overlay_windows(&oc_name, hinstance, &app.config).unwrap_or_default();
+        for ov in &new_overlays {
+            SetWindowLongPtrW(ov.hwnd, GWLP_USERDATA, app_ptr as isize);
+        }
+        app.overlays = new_overlays;
+    }
 }
 
 fn config_mtime_of(_cfg: &Config) -> Option<SystemTime> {
@@ -437,15 +617,41 @@ unsafe fn show_tray_menu(hwnd: HWND, app: &App) {
             mem::transmute::<HMENU, usize>(hsub_opacity),
             WStr::new("Opacity").as_pcwstr(),
         );
-        AppendMenuW(hmenu, MENU_ITEM_FLAGS(MF_SEPARATOR.0), 0, None);
-        AppendMenuW(
-            hmenu,
-            MENU_ITEM_FLAGS(MF_POPUP.0 | MF_STRING.0),
-            mem::transmute::<HMENU, usize>(hsub_profiles),
-            WStr::new("Profiles").as_pcwstr(),
-        );
-        AppendMenuW(hmenu, MENU_ITEM_FLAGS(MF_SEPARATOR.0), 0, None);
-        AppendMenuW(hmenu, MENU_ITEM_FLAGS(0), IDM_EXIT as usize, WStr::new("Exit").as_pcwstr());
+        let hsub_monitor = unsafe { CreatePopupMenu() }.unwrap();
+        {
+            let mirror_flags = MENU_ITEM_FLAGS(if app.config.mirror_crosshair { MF_CHECKED.0 } else { 0 });
+            unsafe {
+                AppendMenuW(hsub_monitor, mirror_flags, IDM_MIRROR_TOGGLE as usize, WStr::new("Mirror All Monitors").as_pcwstr());
+                AppendMenuW(hsub_monitor, MENU_ITEM_FLAGS(MF_SEPARATOR.0), 0, None);
+            }
+            let monitors = enumerate_monitors();
+            for mon in &monitors {
+                let selected = !app.config.mirror_crosshair && mon.index == app.config.set_monitor;
+                let flags = MENU_ITEM_FLAGS(if selected { MF_CHECKED.0 } else { 0 });
+                unsafe {
+                    AppendMenuW(hsub_monitor, flags, (IDM_MONITOR_BASE + mon.index as u16) as usize, WStr::new(&mon.name).as_pcwstr());
+                }
+            }
+        }
+        unsafe {
+            AppendMenuW(
+                hmenu,
+                MENU_ITEM_FLAGS(MF_POPUP.0 | MF_STRING.0),
+                mem::transmute::<HMENU, usize>(hsub_monitor),
+                WStr::new("Monitor").as_pcwstr(),
+            );
+        }
+        unsafe {
+            AppendMenuW(hmenu, MENU_ITEM_FLAGS(MF_SEPARATOR.0), 0, None);
+            AppendMenuW(
+                hmenu,
+                MENU_ITEM_FLAGS(MF_POPUP.0 | MF_STRING.0),
+                mem::transmute::<HMENU, usize>(hsub_profiles),
+                WStr::new("Profiles").as_pcwstr(),
+            );
+            AppendMenuW(hmenu, MENU_ITEM_FLAGS(MF_SEPARATOR.0), 0, None);
+            AppendMenuW(hmenu, MENU_ITEM_FLAGS(0), IDM_EXIT as usize, WStr::new("Exit").as_pcwstr());
+        }
     }
 
     let mut pt = POINT::default();
@@ -487,7 +693,7 @@ unsafe extern "system" fn tray_wndproc(
                 app.config_mtime = new_mtime;
                 app.config = Config::load();
                 app.crosshair_type = app.config.crosshair_type;
-                app.png_bitmap = None;
+                clear_overlay_bitmaps(&mut app.overlays);
                 if app.visible {
                     let _ = render(app);
                 }
@@ -500,16 +706,12 @@ unsafe extern "system" fn tray_wndproc(
             if app.visible {
                 app.config = Config::load();
                 app.crosshair_type = app.config.crosshair_type;
-                ShowWindow(app.overlay_hwnd, SW_SHOW);
-                SetWindowPos(
-                    app.overlay_hwnd,
-                    HWND_TOPMOST,
-                    0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
-                );
+                reconcile_overlays(app);
+                clear_overlay_bitmaps(&mut app.overlays);
+                show_overlays(&app.overlays);
                 let _ = render(app);
             } else {
-                ShowWindow(app.overlay_hwnd, SW_HIDE);
+                hide_overlays(&app.overlays);
             }
             LRESULT(0)
         }
@@ -522,17 +724,12 @@ unsafe extern "system" fn tray_wndproc(
                     if app.visible {
                         app.config = Config::load();
                         app.crosshair_type = app.config.crosshair_type;
-                        app.png_bitmap = None;
-                        ShowWindow(app.overlay_hwnd, SW_SHOW);
-                        SetWindowPos(
-                            app.overlay_hwnd,
-                            HWND_TOPMOST,
-                            0, 0, 0, 0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
-                        );
+                        reconcile_overlays(app);
+                        clear_overlay_bitmaps(&mut app.overlays);
+                        show_overlays(&app.overlays);
                         let _ = render(app);
                     } else {
-                        ShowWindow(app.overlay_hwnd, SW_HIDE);
+                        hide_overlays(&app.overlays);
                     }
                 }
                 IDM_TYPE_DOT => {
@@ -575,7 +772,7 @@ unsafe extern "system" fn tray_wndproc(
                     app.profiles.current = Some(idx);
                     app.profiles.apply_to_config(&mut app.config, idx);
                     app.crosshair_type = app.config.crosshair_type;
-                    app.png_bitmap = None;
+                    clear_overlay_bitmaps(&mut app.overlays);
                     if app.visible { let _ = render(app); }
                 }
                 IDM_PROFILE_SAVE => {
@@ -594,10 +791,30 @@ unsafe extern "system" fn tray_wndproc(
                     app.profiles = crate::profiles::Profiles::load();
                     app.profiles.current = current_name.as_ref().and_then(|n| app.profiles.current_index_by_name(n));
                 }
+                IDM_MIRROR_TOGGLE => {
+                    app.config.mirror_crosshair = !app.config.mirror_crosshair;
+                    reconcile_overlays(app);
+                    clear_overlay_bitmaps(&mut app.overlays);
+                    if app.visible {
+                        show_overlays(&app.overlays);
+                        let _ = render(app);
+                    }
+                }
+                id if id >= IDM_MONITOR_BASE && id < IDM_MONITOR_BASE + 64 => {
+                    let idx = (id - IDM_MONITOR_BASE) as u32;
+                    app.config.mirror_crosshair = false;
+                    app.config.set_monitor = idx;
+                    reconcile_overlays(app);
+                    clear_overlay_bitmaps(&mut app.overlays);
+                    if app.visible {
+                        show_overlays(&app.overlays);
+                        let _ = render(app);
+                    }
+                }
                 IDM_EXIT => {
                     drop_tray_icon(hwnd);
                     let _ = UnregisterHotKey(hwnd, HOTKEY_ID);
-                    ShowWindow(app.overlay_hwnd, SW_HIDE);
+                    hide_overlays(&app.overlays);
                     if let Some(h) = app.custom_icon.take() {
                         DestroyIcon(h);
                     }
@@ -609,15 +826,7 @@ unsafe extern "system" fn tray_wndproc(
         }
         WM_DISPLAYCHANGE => {
             let app = app_mut(hwnd);
-            let mon_rect = primary_monitor_rect();
-            let ow = mon_rect.right - mon_rect.left;
-            let oh = mon_rect.bottom - mon_rect.top;
-            SetWindowPos(
-                app.overlay_hwnd,
-                HWND_TOPMOST,
-                mon_rect.left, mon_rect.top, ow, oh,
-                SWP_NOZORDER,
-            );
+            reconcile_overlays(app);
             if app.visible {
                 let _ = render(app);
             }
@@ -641,7 +850,7 @@ unsafe extern "system" fn overlay_wndproc(
         if msg == WM_CLOSE_MSG {
             let app = app_mut(hwnd);
             app.visible = false;
-            ShowWindow(hwnd, SW_HIDE);
+            hide_overlays(&app.overlays);
             return LRESULT(0);
         }
         DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -650,9 +859,39 @@ unsafe extern "system" fn overlay_wndproc(
 
 // ── Rendering ────────────────────────────────────────────────
 
-unsafe fn render(app: &mut App) -> Result<()> { unsafe {
-    let hwnd = app.overlay_hwnd;
-    let mut rect = RECT::default();
+unsafe fn render(app: &mut App) -> Result<()> {
+    let cfg = app.config.clone();
+    let ctype = app.crosshair_type;
+    let using_png = cfg.png_crosshair.as_ref().map_or(false, |p| !p.is_empty());
+    let (rr, gg, bb) = cfg.parse_color();
+    let main_color = (rr, gg, bb, 1.0);
+    let border_color = (0.0, 0.0, 0.0, 0.5);
+    let (mut dpi_x, mut dpi_y) = (96.0f32, 96.0f32);
+    unsafe { app.factory.GetDesktopDpi(&mut dpi_x, &mut dpi_y) };
+    let scale = dpi_x / 96.0;
+
+    let count = app.overlays.len();
+    for i in 0..count {
+        let ov = &mut app.overlays[i];
+        render_overlay(
+            ov, &app.factory, &cfg, ctype, using_png, main_color, border_color, scale,
+        )?;
+    }
+    Ok(())
+}
+
+unsafe fn render_overlay(
+    ov: &mut OverlayWindow,
+    factory: &ID2D1Factory,
+    cfg: &Config,
+    ctype: CrosshairType,
+    using_png: bool,
+    main_color: crate::canvas::Color,
+    border_color: crate::canvas::Color,
+    scale: f32,
+) -> Result<()> {
+    let hwnd = ov.hwnd;
+    let mut rect = unsafe { RECT::default() };
     unsafe { GetClientRect(hwnd, &mut rect) };
     let w = (rect.right - rect.left) as u32;
     let h = (rect.bottom - rect.top) as u32;
@@ -660,60 +899,54 @@ unsafe fn render(app: &mut App) -> Result<()> { unsafe {
         return Ok(());
     }
 
-    let needs_new = match &app.rt {
+    let needs_new = match &ov.rt {
         Some(r) => r.width != w || r.height != h,
         None => true,
     };
     if needs_new {
-        if let Some(old) = app.rt.take() {
+        if let Some(old) = ov.rt.take() {
             if old.width > 0 {
-                unsafe { SelectObject(old.mem_dc, HGDIOBJ(old.dib.0 as *mut c_void)) };
+                unsafe { SelectObject(old.mem_dc, HGDIOBJ(old.dib.0 as *mut core::ffi::c_void)) };
             }
-            unsafe { DeleteObject(HGDIOBJ(old.dib.0 as *mut c_void)) };
+            unsafe { DeleteObject(HGDIOBJ(old.dib.0 as *mut core::ffi::c_void)) };
             unsafe { DeleteDC(old.mem_dc) };
         }
-        app.rt = Some(create_rt(w, h, &app.factory)?);
+        ov.rt = Some(create_rt(w, h, factory)?);
     }
 
-    let res = app.rt.as_ref().unwrap();
+    let res = ov.rt.as_ref().unwrap();
     let target = &res.target;
 
     use std::ops::Deref;
     let rt: &ID2D1RenderTarget = target.deref();
 
-    rt.BeginDraw();
-    rt.Clear(Some(&D2D1_COLOR_F {
-        r: 0.0,
-        g: 0.0,
-        b: 0.0,
-        a: 0.0,
-    } as *const D2D1_COLOR_F));
+    unsafe { rt.BeginDraw() };
+    unsafe {
+        rt.Clear(Some(&D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        } as *const D2D1_COLOR_F));
+    }
 
-    let (rr, gg, bb) = app.config.parse_color();
-    let main_color = (rr, gg, bb, 1.0);
-    let border_color = (0.0, 0.0, 0.0, 0.5);
+    let cx = w as f32 / 2.0 + cfg.adjust_x;
+    let cy = h as f32 / 2.0 + cfg.adjust_y;
 
-    let (mut dpi_x, mut dpi_y) = (96.0f32, 96.0f32);
-    app.factory.GetDesktopDpi(&mut dpi_x, &mut dpi_y);
-    let scale = dpi_x / 96.0;
-    let cx = w as f32 / 2.0;
-    let cy = h as f32 / 2.0;
-
-    let using_png = app.config.png_crosshair.as_ref().map_or(false, |p| !p.is_empty());
     if using_png {
-        if app.png_bitmap.is_none() || needs_new {
-            app.png_bitmap = png_load_bitmap(&app.config, &app.factory, target);
+        if ov.png_bitmap.is_none() || needs_new {
+            ov.png_bitmap = png_load_bitmap(cfg, factory, target);
         }
-        if let Some(ref bmp) = app.png_bitmap {
+        if let Some(ref bmp) = ov.png_bitmap {
             let bmp_size = unsafe { bmp.GetSize() };
             let img_w = bmp_size.width as f32;
             let img_h = bmp_size.height as f32;
-            let target_size = app.config.size * scale;
+            let target_size = cfg.size * scale;
             let aspect = img_h / img_w;
             let draw_w = target_size;
             let draw_h = target_size * aspect;
 
-            let rotation = app.config.rotation.to_radians();
+            let rotation = cfg.rotation.to_radians();
             if rotation != 0.0 {
                 let (sa, ca) = rotation.sin_cos();
                 let m = Matrix3x2 {
@@ -735,7 +968,7 @@ unsafe fn render(app: &mut App) -> Result<()> { unsafe {
                 let _ = rt.DrawBitmap(
                     bmp,
                     Some(&dest as *const D2D_RECT_F),
-                    app.config.opacity,
+                    cfg.opacity,
                     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
                     None,
                 );
@@ -753,22 +986,22 @@ unsafe fn render(app: &mut App) -> Result<()> { unsafe {
     } else {
         let mut d2d_canvas = D2DCanvas::new(target, w, h);
         crate::crosshair::draw(
-            &mut d2d_canvas, main_color, Some(border_color), app.crosshair_type, cx, cy,
-            app.config.size * scale,
-            app.config.thickness_h * scale,
-            app.config.thickness_v * scale,
-            app.config.dot_center,
-            app.config.border,
-            app.config.border_size * scale,
-            app.config.space_width * scale,
-            app.config.rotation,
-            app.config.dot_size,
+            &mut d2d_canvas, main_color, Some(border_color), ctype, cx, cy,
+            cfg.size * scale,
+            cfg.thickness_h * scale,
+            cfg.thickness_v * scale,
+            cfg.dot_center,
+            cfg.border,
+            cfg.border_size * scale,
+            cfg.space_width * scale,
+            cfg.rotation,
+            cfg.dot_size,
         );
     }
 
-    rt.EndDraw(None, None)?;
+    unsafe { rt.EndDraw(None, None)? };
 
-    let mut wr = RECT::default();
+    let mut wr = unsafe { RECT::default() };
     unsafe { GetWindowRect(hwnd, &mut wr) };
     let pt_dst = POINT {
         x: wr.left,
@@ -782,7 +1015,7 @@ unsafe fn render(app: &mut App) -> Result<()> { unsafe {
     let blend = BLENDFUNCTION {
         BlendOp: 0,
         BlendFlags: 0,
-        SourceConstantAlpha: (app.config.opacity * 255.0) as u8,
+        SourceConstantAlpha: (cfg.opacity * 255.0) as u8,
         AlphaFormat: 1,
     };
 
@@ -799,7 +1032,7 @@ unsafe fn render(app: &mut App) -> Result<()> { unsafe {
             UPDATE_LAYERED_WINDOW_FLAGS(2),
         )
     }
-}}
+}
 
 unsafe fn create_rt(w: u32, h: u32, factory: &ID2D1Factory) -> Result<RenderResources> { unsafe {
     let mem_dc = unsafe { CreateCompatibleDC(None) };

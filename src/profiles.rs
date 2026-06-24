@@ -21,6 +21,10 @@ pub struct Profile {
     pub dot_size: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub png_crosshair: Option<String>,
+    pub mirror_crosshair: bool,
+    pub set_monitor: u32,
+    pub adjust_x: f32,
+    pub adjust_y: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +59,10 @@ impl Profile {
             rotation: config.rotation,
             dot_size: config.dot_size,
             png_crosshair: config.png_crosshair.clone(),
+            mirror_crosshair: config.mirror_crosshair,
+            set_monitor: config.set_monitor,
+            adjust_x: config.adjust_x,
+            adjust_y: config.adjust_y,
         }
     }
 }
@@ -92,6 +100,10 @@ impl Profiles {
             config.rotation = p.rotation;
             config.dot_size = p.dot_size;
             config.png_crosshair = p.png_crosshair.clone();
+            config.mirror_crosshair = p.mirror_crosshair;
+            config.set_monitor = p.set_monitor;
+            config.adjust_x = p.adjust_x;
+            config.adjust_y = p.adjust_y;
         }
     }
 
@@ -112,6 +124,10 @@ impl Profiles {
                 p.rotation = config.rotation;
                 p.dot_size = config.dot_size;
                 p.png_crosshair = config.png_crosshair.clone();
+                p.mirror_crosshair = config.mirror_crosshair;
+                p.set_monitor = config.set_monitor;
+                p.adjust_x = config.adjust_x;
+                p.adjust_y = config.adjust_y;
             }
         }
     }

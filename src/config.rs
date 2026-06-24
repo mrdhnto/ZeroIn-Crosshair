@@ -143,6 +143,10 @@ pub struct Config {
     pub secondary_key: String,
     pub rotation: f32,
     pub png_crosshair: Option<String>,
+    pub mirror_crosshair: bool,
+    pub set_monitor: u32,
+    pub adjust_x: f32,
+    pub adjust_y: f32,
 }
 
 impl Default for Config {
@@ -164,6 +168,10 @@ impl Default for Config {
             secondary_key: "\\".into(),
             rotation: 0.0,
             png_crosshair: None,
+            mirror_crosshair: false,
+            set_monitor: 0,
+            adjust_x: 0.0,
+            adjust_y: 0.0,
         }
     }
 }
@@ -310,6 +318,19 @@ impl Config {
                         }
                         "rotation" => {
                             config.rotation = value.parse::<f32>().unwrap_or(0.0);
+                        }
+                        "mirror_crosshair" => {
+                            config.mirror_crosshair = value.eq_ignore_ascii_case("true")
+                                || value == "1"
+                        }
+                        "set_monitor" => {
+                            config.set_monitor = value.parse::<u32>().unwrap_or(0);
+                        }
+                        "adjust_x" => {
+                            config.adjust_x = value.parse::<f32>().unwrap_or(0.0);
+                        }
+                        "adjust_y" => {
+                            config.adjust_y = value.parse::<f32>().unwrap_or(0.0);
                         }
                         _ => {}
                     }

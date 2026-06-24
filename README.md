@@ -4,12 +4,12 @@
   <p><i>"A zero-overhead, anti-cheat-safe crosshair overlay for Windows and Linux gamers"</i></p>
 
   <p>
-    <img src="https://img.shields.io/github/v/release/mrdhnto/ZeroIn?style=for-the-badge&logo=ghost&color=00ffff" alt="Version">
+    <img src="https://img.shields.io/github/v/release/mrdhnto/ZeroIn-Crosshair?style=for-the-badge&logo=ghost&color=00ffff" alt="Version">
     <img src="https://img.shields.io/badge/Platform-Windows-8a2be2?style=for-the-badge&logo=windows11" alt="Windows">
     <img src="https://img.shields.io/badge/Platform-Linux-fcc624?style=for-the-badge&logo=linux" alt="Linux">
     <img src="https://img.shields.io/badge/Rust-stable-e05a2c?style=for-the-badge&logo=rust" alt="Rust">
     <img src="https://img.shields.io/badge/License-MIT-00ff7f?style=for-the-badge" alt="License">
-    <img src="https://img.shields.io/github/actions/workflow/status/mrdhnto/ZeroIn/ci.yml?style=for-the-badge&logo=githubactions&label=CI" alt="CI">
+    <img src="https://img.shields.io/github/actions/workflow/status/mrdhnto/ZeroIn-Crosshair/ci.yml?style=for-the-badge&logo=githubactions&label=CI" alt="CI">
   </p>
 </div>
 
@@ -29,8 +29,10 @@ Renders a transparent on-screen crosshair using Direct2D (Windows) or a software
 - **Auto-reload** : `config.ini` changes are detected and reloaded automatically
 - **Opacity quick presets** : set opacity directly from the tray submenu
 - **Per-monitor DPI aware** : crisp rendering on any display scaling
+- **Multi-monitor support** : mirror crosshair across all monitors, or pick a specific monitor via config or tray menu
+- **Position adjustment** : fine-tune crosshair XY offset from center (`adjust_x` / `adjust_y`)
 - **Click-through overlay** : mouse events pass straight to the window behind
-- **System tray** : toggle on/off, switch types, reload config without restarting
+- **System tray** : toggle on/off, switch types, pick monitor, reload config without restarting
 - **Persistent config** : reads `config.ini` next to the executable
 
 ## Why ZeroIn?
@@ -73,7 +75,7 @@ Kernel-level anti-cheat (Vanguard, BattlEye, EAC, Ricochet) operates at a lower 
 
 ## Usage
 
-1. [Download the latest release](https://github.com/mrdhnto/ZeroIn/releases/latest).
+1. [Download the latest release](https://github.com/mrdhnto/ZeroIn-Crosshair/releases/latest).
 2. Place `config.ini` next to the executable (optional, defaults apply otherwise).
 3. Run `ZeroIn.exe` (Windows) or `./ZeroIn` (Linux). It lives in the system tray.
 4. Right-click the tray icon to:
@@ -105,13 +107,16 @@ primary_key = CTRL    ; modifier: CTRL | SHIFT | ALT | WIN (or combined like CTR
 secondary_key = \     ; key: letter, number, F-key, or symbol (\, -, =, [, ], etc.)
 rotation = 0.0        ; rotation in degrees
 png_crosshair =       ; path to PNG file to use as crosshair (overrides type, respects size/rotation/opacity)
+mirror_crosshair = false ; show crosshair on all monitors (true/false)
+set_monitor = 0       ; which monitor to use (0=primary). Ignored when mirror_crosshair=true
+adjust_x = 0          ; fine-tune X position from center (pixels, negative=left)
+adjust_y = 0          ; fine-tune Y position from center (pixels, negative=up)
 ```
 
 Default config applies if the file is missing or a value is invalid. Invalid values are logged to `ZeroIn.log` next to the executable.
 
 ## Known Limitations
 
-- **Single monitor** : the overlay renders on your primary display. Multi-monitor spanning is not yet supported.
 - **Polling config reload** : changes are detected every 2 seconds (not instant file system watching).
 - **Exclusive fullscreen** : some older titles in exclusive fullscreen may hide the overlay. Run in **borderless windowed mode** (display borderless windowed) for guaranteed compatibility, virtually all modern games support this.
 - **Not captured by OBS** : the overlay is visible on screen but may not appear in OBS without game capture source.
@@ -125,7 +130,7 @@ Default config applies if the file is missing or a value is invalid. Invalid val
 
 **Windows:**
 ```sh
-git clone https://github.com/mrdhnto/ZeroIn
+git clone https://github.com/mrdhnto/ZeroIn-Crosshair
 cd ZeroIn
 cargo build --release
 ```
@@ -138,11 +143,11 @@ sudo apt install build-essential pkg-config libgtk-3-dev libx11-dev \
   libxcb-composite0-dev libxcb-xkb-dev libxcb-xinput-dev \
   libxcb-xinerama0-dev libxcb-cursor-dev libasound2-dev
 ```
-*Tray icon on Ubuntu ≥24.04: install `libayatana-appindicator-dev` instead of `libappindicator-dev`.*
+*Tray icon on Ubuntu ≥24.04: install `libayatana-appindicator-dev` instead of `libappindicator-dev`. or try `libayatana-appindicator3-dev` if not found*
 
 **Linux:**
 ```sh
-git clone https://github.com/mrdhnto/ZeroIn
+git clone https://github.com/mrdhnto/ZeroIn-Crosshair
 cd ZeroIn
 cargo build --release
 ```
@@ -156,6 +161,9 @@ The binary will be at `target/release/ZeroIn`. Place `config.ini` next to it.
 - Crosshair drawn with Direct2D primitives (ellipses, rectangles, lines) via `D2DCanvas` wrapper
 - PNG crosshair decoded via `image` crate, rendered as `ID2D1Bitmap` with premultiplied alpha
 - Per-monitor DPI awareness via `SetProcessDpiAwarenessContext`
+- Multi-monitor: one overlay window per monitor (mirror mode), or single overlay on selected monitor
+- Monitor enumeration via `EnumDisplayMonitors`; hotplug handled via `WM_DISPLAYCHANGE` with overlay reconciliation
+- Position adjustment via `adjust_x`/`adjust_y` offset from each overlay's center
 - Hotkey via `RegisterHotKey` (global system-wide) with `WM_HOTKEY` message handling
 - Click-through via `WS_EX_TRANSPARENT` extended window style
 - Opacity via `UpdateLayeredWindow` with `BLENDFUNCTION.SourceConstantAlpha`
@@ -177,12 +185,8 @@ The binary will be at `target/release/ZeroIn`. Place `config.ini` next to it.
 
 ## Contributing
 
-PRs and issues welcome. Check the [open issues](https://github.com/mrdhnto/ZeroIn/issues) for planned work or suggest your own.
+PRs and issues welcome. Check the [open issues](https://github.com/mrdhnto/ZeroIn-Crosshair/issues) for planned work or suggest your own.
 
 ## License
 
 MIT
-
----
-
-*Keywords: crosshair overlay, transparent crosshair, game crosshair overlay, Windows crosshair, Linux crosshair FPS crosshair, custom crosshair, on-screen crosshair, aim crosshair, crosshair for any game, gaming overlay, Direct2D overlay, hardware accelerated crosshair, lightweight crosshair, Rust game utility, no bloat crosshair, low latency crosshair, anti-cheat safe crosshair, Vanguard safe crosshair, BattlEye safe crosshair, EAC safe crosshair, undetected crosshair, Valorant crosshair overlay, CS2 crosshair, Apex Legends crosshair, Fortnite crosshair, crosshair for FPS games, borderless windowed crosshair, display borderless windowed crosshair, Rust crosshair overlay, Windows gaming overlay, free crosshair overlay, open source crosshair overlay, crosshair-x alternative, crosshair-y alternative, crosshairx alternative, crosshairy alternative, crosshair x alternative, crosshair y alternative.*

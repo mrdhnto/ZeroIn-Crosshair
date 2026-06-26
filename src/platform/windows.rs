@@ -24,10 +24,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, RegisterHot
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::ModifyKind;
+
+use windows::Win32::System::Threading::GetCurrentThreadId;
+
 use crate::canvas::D2DCanvas;
 use crate::config::{Config, CrosshairType, Hotkey};
 
 const WM_TRAYICON: u32 = WM_APP + 1;
+const WM_CONFIG_CHANGED: u32 = WM_APP + 2;
 const WM_HOTKEY_MSG: u32 = 0x0312;
 const WM_CLOSE_MSG: u32 = 0x0010;
 const HOTKEY_ID: i32 = 9001;
@@ -232,7 +238,38 @@ fn run_impl() -> Result<()> {
             );
         }
 
-        SetTimer(tray_hwnd, 1, 2000, None);
+        // Set up file watcher for config.ini
+        // Watch the parent directory, not the file, to survive atomic saves
+        // (editors rename temp → target, changing the inode)
+        let config_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let tid = unsafe { GetCurrentThreadId() };
+        let mut watcher: RecommendedWatcher = Watcher::new(
+            move |event: std::result::Result<notify::Event, notify::Error>| {
+                if let Ok(event) = event {
+                    let is_config = event.paths.iter().any(|p| p.ends_with("config.ini"));
+                    if !is_config { return; }
+                    match event.kind {
+                        EventKind::Modify(ModifyKind::Data(_))
+                        | EventKind::Modify(ModifyKind::Name(_))
+                        | EventKind::Create(_) => {
+                            unsafe { let _ = PostThreadMessageW(tid, WM_CONFIG_CHANGED, WPARAM(0), LPARAM(0)); }
+                        }
+                        _ => {}
+                    }
+                }
+            },
+            NotifyConfig::default(),
+        ).unwrap();
+        if watcher.watch(&config_dir, RecursiveMode::NonRecursive).is_err() {
+            let _ = crate::config::log_warning("ZeroIn: failed to watch config directory");
+        }
+        Box::leak(Box::new(watcher));
+
+        // Polling fallback: 2s timer checks mtime in case watcher misses events
+        let _ = unsafe { SetTimer(tray_hwnd, 1, 2000, None); };
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).into() {
@@ -686,12 +723,28 @@ unsafe extern "system" fn tray_wndproc(
             }
             LRESULT(0)
         }
-        WM_TIMER => {
+        WM_CONFIG_CHANGED => {
             let app = app_mut(hwnd);
             let new_mtime = config_mtime_of(&app.config);
             if new_mtime != app.config_mtime {
                 app.config_mtime = new_mtime;
-                app.config = Config::load();
+                crate::profiles::load_config_with_active_profile(&mut app.config, &app.profiles);
+                app.crosshair_type = app.config.crosshair_type;
+                clear_overlay_bitmaps(&mut app.overlays);
+                if app.visible {
+                    let _ = render(app);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_TIMER => {
+            // Polling fallback: check mtime every 2s for changes watcher missed
+            // (atomic saves, network drives, etc.)
+            let app = app_mut(hwnd);
+            let new_mtime = config_mtime_of(&app.config);
+            if new_mtime != app.config_mtime {
+                app.config_mtime = new_mtime;
+                crate::profiles::load_config_with_active_profile(&mut app.config, &app.profiles);
                 app.crosshair_type = app.config.crosshair_type;
                 clear_overlay_bitmaps(&mut app.overlays);
                 if app.visible {
@@ -704,7 +757,7 @@ unsafe extern "system" fn tray_wndproc(
             let app = app_mut(hwnd);
             app.visible = !app.visible;
             if app.visible {
-                app.config = Config::load();
+                crate::profiles::load_config_with_active_profile(&mut app.config, &app.profiles);
                 app.crosshair_type = app.config.crosshair_type;
                 reconcile_overlays(app);
                 clear_overlay_bitmaps(&mut app.overlays);
@@ -722,7 +775,7 @@ unsafe extern "system" fn tray_wndproc(
                 IDM_TOGGLE => {
                     app.visible = !app.visible;
                     if app.visible {
-                        app.config = Config::load();
+                        crate::profiles::load_config_with_active_profile(&mut app.config, &app.profiles);
                         app.crosshair_type = app.config.crosshair_type;
                         reconcile_overlays(app);
                         clear_overlay_bitmaps(&mut app.overlays);
@@ -790,6 +843,12 @@ unsafe extern "system" fn tray_wndproc(
                     let current_name = app.profiles.current.and_then(|i| app.profiles.list.get(i)).map(|p| p.name.clone());
                     app.profiles = crate::profiles::Profiles::load();
                     app.profiles.current = current_name.as_ref().and_then(|n| app.profiles.current_index_by_name(n));
+                    if let Some(idx) = app.profiles.current {
+                        app.profiles.apply_to_config(&mut app.config, idx);
+                        app.crosshair_type = app.config.crosshair_type;
+                        clear_overlay_bitmaps(&mut app.overlays);
+                        if app.visible { let _ = render(app); }
+                    }
                 }
                 IDM_MIRROR_TOGGLE => {
                     app.config.mirror_crosshair = !app.config.mirror_crosshair;
@@ -865,7 +924,8 @@ unsafe fn render(app: &mut App) -> Result<()> {
     let using_png = cfg.png_crosshair.as_ref().map_or(false, |p| !p.is_empty());
     let (rr, gg, bb) = cfg.parse_color();
     let main_color = (rr, gg, bb, 1.0);
-    let border_color = (0.0, 0.0, 0.0, 0.5);
+    let (br, bg, bb2) = cfg.parse_border_color();
+    let border_color = (br, bg, bb2, cfg.opacity);
     let (mut dpi_x, mut dpi_y) = (96.0f32, 96.0f32);
     unsafe { app.factory.GetDesktopDpi(&mut dpi_x, &mut dpi_y) };
     let scale = dpi_x / 96.0;

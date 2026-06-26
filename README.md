@@ -23,10 +23,11 @@ Renders a transparent on-screen crosshair using Direct2D (Windows) or a software
 - **PNG image crosshair** : load any PNG file as crosshair (overrides geometry types)
 - **Fully configurable** : size, thickness, color (hex), opacity, center dot, border, border size, gap width, rotation, center dot size
 - **Independent H/V arm thickness** : separate thickness control for horizontal and vertical arms
-- **Background outline for all types** : configurable black border behind any crosshair shape
+- **Background outline for all types** : configurable color border behind any crosshair shape
 - **Global hotkey** : toggle crosshair with a configurable hotkey (default `CTRL` + `\`)
 - **Named profiles** : save/load named profiles from `presets.json` via tray menu
-- **Auto-reload** : `config.ini` changes are detected and reloaded automatically
+- **Use config.ini mode** : detach from profiles and fall back to raw `config.ini` settings (default state)
+- **Instant auto-reload** : `config.ini` changes are detected instantly via file system events (no polling)
 - **Opacity quick presets** : set opacity directly from the tray submenu
 - **Per-monitor DPI aware** : crisp rendering on any display scaling
 - **Multi-monitor support** : mirror crosshair across all monitors, or pick a specific monitor via config or tray menu
@@ -41,35 +42,39 @@ Most crosshair overlays are AutoHotkey scripts, Electron apps, or game-specific 
 
 | ZeroIn | AHK scripts | Electron overlays | Game-specific tools |
 |---|---|---|---|
-| ~600KB binary | Needs AHK runtime | 100MB+ with bundled runtime | Only one game |
+| ~800KB binary | Needs AHK runtime | 100MB+ with bundled runtime | Only one game |
 | Direct2D (Win) / SwCanvas (Linux) | GDI-based (slower) | GPU compositor overhead | Game-dependent |
 | PNG crosshair support | Shapes only | Usually shapes only | Limited shapes |
 | Works with any borderless windowed game | Untested/unreliable | Untested/unreliable | Only one game |
 | Per-monitor DPI aware | No | Mostly no | Usually no |
 | Named profiles per game | Manual switching | Manual switching | One profile |
-| Config auto-reload | No | Restart required | Restart required |
+| Instant config auto-reload (fsnotify) | No | Restart required | Restart required |
 | Open source MIT | Yes | Rarely | No |
 
-ZeroIn is a focused, minimal crosshair overlay for FPS games on Windows and Linux that does one thing well: render a custom crosshair you can see in any title without getting in the way. Anti-cheat safe, low latency, and invisible to anti-cheat engines.
+ZeroIn is a focused, minimal crosshair overlay for FPS games on Windows and Linux that does one thing well: render a custom crosshair you can see in any title without getting in the way. Low latency, transparent overlay — no process access, nothing for kernel-level anti-cheat to conventionally detect.
 
-## Compatibility & Anti-Cheat
+## Compatibility & Anti-Cheat Notes
+
+**Important:** "Not detected by anti-cheat software" and "permitted by the game's Terms of Service" are different things. Riot, Valve, and Activision's ToS may restrict any overlay that alters in-game visual information. This is not legal advice — use at your own discretion. Anti-cheat behavior also changes with updates, so there are never zero-risk guarantees.
 
 **Windows:** ZeroIn uses `UpdateLayeredWindow` with `WS_EX_TRANSPARENT`. The same transparent overlay technique as Discord and Steam overlays.
 
 **Linux:** ZeroIn uses `winit` to create a transparent always-on-top window, `softbuffer` for pixel buffer display, and X11 ShapeMask for click-through. Works on X11 sessions; Wayland has limited support (tray icon works, but global hotkeys and click-through are unavailable).
 
-**Anti-cheat safe across the board on both platforms.** ZeroIn does not inject, hook, read memory, or modify any process. It is a pure transparent window, invisible to kernel-level anti-cheat engines like Vanguard, BattlEye, and Easy Anti-Cheat. No detections, no bans, no risk.
+**Does not interact with game processes.** ZeroIn does not inject, hook, read memory, or modify any process. It is a pure transparent window with no process access — the same overlay technique used by Discord and Steam.
 
 | Game | Anti-Cheat | Status |
 |---|---|---|
-| Counter-Strike 2 | VAC | ✓ Tested, no issues |
-| Valorant | Vanguard | ✓ Tested, no issues |
-| Apex Legends | Easy Anti-Cheat | ✓ Tested, no issues |
-| Fortnite | BattlEye + EAC | ✓ Tested, no issues |
-| Overwatch 2 | - | ✓ Tested, no issues |
-| **Any game in borderless windowed** | **Any anti-cheat** | **✓ 99% Guaranteed, zero process access** |
+| Counter-Strike 2 | VAC | ✓ Tested in ranked match, no issues |
+| Valorant | Vanguard | ✓ Tested in competitive, no issues |
+| PUBG | BattlEye | ✓ Tested in ranked match, no issues |
+| Apex Legends | Easy Anti-Cheat | ✓ Functional test only, no issues |
+| Fortnite | BattlEye + EAC | ✓ Functional test only, no issues |
+| Overwatch 2 | - | ✓ Functional test only, no issues |
 
-Kernel-level anti-cheat (Vanguard, BattlEye, EAC, Ricochet) operates at a lower ring level than ZeroIn's user-mode overlay. Because ZeroIn never touches the target process. No handles, no threads, no injection, no hooks, there is nothing for anti-cheat to detect. It is a transparent click-through window, not a game modification.
+Kernel-level anti-cheat (Vanguard, BattlEye, EAC, Ricochet) operates at a lower ring level than ZeroIn's user-mode overlay. ZeroIn never touches the target process — no handles, no threads, no injection, no hooks. It is a transparent click-through window, not a game modification.
+
+CS2, Valorant, and PUBG above were personally tested in ranked/competitive play. Apex Legends, Fortnite, and Overwatch 2 were functionally tested only — if you play those in ranked queues, exercise your own judgment.
 
 **If your game supports borderless windowed / display borderless windowed mode, ZeroIn will work.** This covers virtually every modern title.
 
@@ -82,8 +87,9 @@ Kernel-level anti-cheat (Vanguard, BattlEye, EAC, Ricochet) operates at a lower 
    - Toggle crosshair on/off
    - Switch crosshair type
    - Choose opacity preset
-   - Select a named profile, save current settings, or save as new profile
-   - Reload config
+   - Pick monitor or mirror all monitors
+   - Select a named profile, use config.ini directly, save current settings, or save as new profile
+   - Reload profiles from disk
 
 ## Configuration
 
@@ -117,11 +123,10 @@ Default config applies if the file is missing or a value is invalid. Invalid val
 
 ## Known Limitations
 
-- **Polling config reload** : changes are detected every 2 seconds (not instant file system watching).
 - **Exclusive fullscreen** : some older titles in exclusive fullscreen may hide the overlay. Run in **borderless windowed mode** (display borderless windowed) for guaranteed compatibility, virtually all modern games support this.
 - **Not captured by OBS** : the overlay is visible on screen but may not appear in OBS without game capture source.
 - **Linux X11-only** : requires the X11 display server. Wayland is detected at runtime; global hotkeys and click-through are unavailable on Wayland (tray icon still works).
-- **Software rendered on Linux** : crosshair is rasterized in software via SwCanvas (CPU), not GPU-accelerated like the Windows Direct2D path. Efficient (<1% CPU) for overlay use.
+- **Software rendered on Linux** : crosshair is rasterized in software via SwCanvas (CPU) with per-frame redraw, resulting in higher CPU usage compared to Windows. A GPU-accelerated rendering pipeline (wgpu) is planned for a future update.
 
 ## Build from Source
 
@@ -143,7 +148,7 @@ sudo apt install build-essential pkg-config libgtk-3-dev libx11-dev \
   libxcb-composite0-dev libxcb-xkb-dev libxcb-xinput-dev \
   libxcb-xinerama0-dev libxcb-cursor-dev libasound2-dev
 ```
-*Tray icon on Ubuntu ≥24.04: install `libayatana-appindicator-dev` instead of `libappindicator-dev`. or try `libayatana-appindicator3-dev` if not found*
+*Tray icon on Ubuntu ≥24.04: install `libayatana-appindicator-dev` instead of `libappindicator-dev`, or try `libayatana-appindicator3-dev` if not found.*
 
 **Linux:**
 ```sh
@@ -175,13 +180,31 @@ The binary will be at `target/release/ZeroIn`. Place `config.ini` next to it.
 - Click-through via `set_cursor_hittest(false)` (winit) + X11 `shape_rectangles` for input passthrough
 - System tray via `tray-icon` crate in a dedicated GTK thread (`gtk::main_iteration_do` pump), with radio-opacity and toggle-checked commands bridged via channel
 - GTK 3.24+ required for tray icon (libappindicator / ayatana-appindicator)
-- Config auto-reload via `AboutToWait` polling every 2 seconds
+- Instant config auto-reload via `notify` crate — file system events trigger immediate reload (no polling)
+- Multi-monitor: one overlay window per monitor with per-monitor `SwCanvas`, reconciliation via `determine_targets`/`reconcile_overlays`
+- Monitor enumeration via `winit::Window::available_monitors` on each `AboutToWait` refresh
 - Tray icon loaded from embedded `icon.png` at compile time, with file fallback
 
 **Cross-platform:**
-- Profiles serialized as `presets.json` via `serde_json`
+- Profiles serialized as `presets.json` via `serde_json` — select a named profile from the tray menu, or choose **Use config.ini** to detach and read directly from `config.ini`
+- Profile reload from disk re-applies the active profile to the visual state immediately
 - PNG crosshair decoding via `image` crate
 - `Canvas` trait abstracts drawing primitives — `crosshair.rs` is pure math, no platform deps
+
+## Preview
+
+![ZeroIn crosshair over CS2](screenshots/crosshair-cs2.png)
+![ZeroIn crosshair over Valorant](screenshots/crosshair-valorant.png)
+
+## Project Status
+
+ZeroIn is in active development. Feature depth (6 crosshair types, PNG support, independent H/V thickness, named profiles, instant fsnotify reload, multi-monitor, per-monitor DPI) already exceeds most alternatives — including linux support. Expect steady improvements until feature-complete, then maintenance-only.
+
+If you have ideas, want to contribute features (help is very welcome), or just want to report a bug — I highly appreciate it.
+
+**Current focus:**
+- Tests and CI benchmarks
+- Dependency auditing (deny.toml)
 
 ## Contributing
 
@@ -189,4 +212,4 @@ PRs and issues welcome. Check the [open issues](https://github.com/mrdhnto/ZeroI
 
 ## License
 
-MIT
+This project is licensed under the [MIT License](LICENSE).

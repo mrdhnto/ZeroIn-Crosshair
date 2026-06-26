@@ -12,6 +12,7 @@ pub struct Profile {
     pub thickness_h: f32,
     pub thickness_v: f32,
     pub color_hex: String,
+    pub border_color_hex: String,
     pub dot_center: bool,
     pub opacity: f32,
     pub border: bool,
@@ -41,6 +42,28 @@ fn exe_dir() -> PathBuf {
 }
 
 impl Profile {
+    pub fn apply_to_config(&self, config: &mut crate::config::Config) {
+        config.crosshair_type = crate::config::CrosshairType::from_str(&self.crosshair_type);
+        config.size = self.size;
+        config.thickness = self.thickness;
+        config.thickness_h = self.thickness_h;
+        config.thickness_v = self.thickness_v;
+        config.color_hex = self.color_hex.clone();
+        config.border_color_hex = self.border_color_hex.clone();
+        config.dot_center = self.dot_center;
+        config.opacity = self.opacity;
+        config.border = self.border;
+        config.border_size = self.border_size;
+        config.space_width = self.space_width;
+        config.rotation = self.rotation;
+        config.dot_size = self.dot_size;
+        config.png_crosshair = self.png_crosshair.clone();
+        config.mirror_crosshair = self.mirror_crosshair;
+        config.set_monitor = self.set_monitor;
+        config.adjust_x = self.adjust_x;
+        config.adjust_y = self.adjust_y;
+    }
+
     pub fn from_config(name: String, config: &crate::config::Config) -> Self {
         Self {
             name,
@@ -51,6 +74,7 @@ impl Profile {
             thickness_h: config.thickness_h,
             thickness_v: config.thickness_v,
             color_hex: config.color_hex.clone(),
+            border_color_hex: config.border_color_hex.clone(),
             dot_center: config.dot_center,
             opacity: config.opacity,
             border: config.border,
@@ -86,24 +110,7 @@ impl Profiles {
 
     pub fn apply_to_config(&self, config: &mut crate::config::Config, idx: usize) {
         if let Some(p) = self.list.get(idx) {
-            config.crosshair_type = crate::config::CrosshairType::from_str(&p.crosshair_type);
-            config.size = p.size;
-            config.thickness = p.thickness;
-            config.thickness_h = p.thickness_h;
-            config.thickness_v = p.thickness_v;
-            config.color_hex = p.color_hex.clone();
-            config.dot_center = p.dot_center;
-            config.opacity = p.opacity;
-            config.border = p.border;
-            config.border_size = p.border_size;
-            config.space_width = p.space_width;
-            config.rotation = p.rotation;
-            config.dot_size = p.dot_size;
-            config.png_crosshair = p.png_crosshair.clone();
-            config.mirror_crosshair = p.mirror_crosshair;
-            config.set_monitor = p.set_monitor;
-            config.adjust_x = p.adjust_x;
-            config.adjust_y = p.adjust_y;
+            p.apply_to_config(config);
         }
     }
 
@@ -116,6 +123,7 @@ impl Profiles {
                 p.thickness_h = config.thickness_h;
                 p.thickness_v = config.thickness_v;
                 p.color_hex = config.color_hex.clone();
+                p.border_color_hex = config.border_color_hex.clone();
                 p.dot_center = config.dot_center;
                 p.opacity = config.opacity;
                 p.border = config.border;
@@ -134,5 +142,14 @@ impl Profiles {
 
     pub fn current_index_by_name(&self, name: &str) -> Option<usize> {
         self.list.iter().position(|p| p.name == name)
+    }
+}
+
+pub fn load_config_with_active_profile(config: &mut crate::config::Config, profiles: &Profiles) {
+    *config = crate::config::Config::load();
+    if let Some(idx) = profiles.current {
+        if idx < profiles.list.len() {
+            profiles.apply_to_config(config, idx);
+        }
     }
 }

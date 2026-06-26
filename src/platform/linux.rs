@@ -1,7 +1,11 @@
 use std::cell::RefCell;
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
+
+use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::ModifyKind;
 
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
@@ -46,9 +50,40 @@ struct App {
     overlays: Vec<OverlayWindow>,
 }
 
+impl App {
+    fn reload_config(&mut self) {
+        let active_idx = self.profiles.current;
+        self.config = Config::load();
+        if let Some(idx) = active_idx {
+            if let Some(profile) = self.profiles.list.get(idx).cloned() {
+                self.config.crosshair_type = CrosshairType::from_str(&profile.crosshair_type);
+                self.config.size = profile.size;
+                self.config.thickness = profile.thickness;
+                self.config.thickness_h = profile.thickness_h;
+                self.config.thickness_v = profile.thickness_v;
+                self.config.color_hex = profile.color_hex.clone();
+                self.config.dot_center = profile.dot_center;
+                self.config.opacity = profile.opacity;
+                self.config.border = profile.border;
+                self.config.border_size = profile.border_size;
+                self.config.space_width = profile.space_width;
+                self.config.rotation = profile.rotation;
+                self.config.dot_size = profile.dot_size;
+                self.config.png_crosshair = profile.png_crosshair.clone();
+                self.config.mirror_crosshair = profile.mirror_crosshair;
+                self.config.set_monitor = profile.set_monitor;
+                self.config.adjust_x = profile.adjust_x;
+                self.config.adjust_y = profile.adjust_y;
+            }
+        }
+        self.crosshair_type = self.config.crosshair_type;
+    }
+}
+
 enum UserEvent {
     #[allow(dead_code)]
     HotkeyPressed,
+    ConfigFileChanged,
 }
 
 fn exe_dir() -> std::path::PathBuf {
@@ -148,6 +183,8 @@ struct TrayMenuIds {
     exit_id: MenuId,
     mirror_id: MenuId,
     monitor_ids: Vec<MenuId>,
+    profile_ids: Vec<MenuId>,
+    use_config_id: MenuId,
 }
 
 enum TrayCommand {
@@ -155,6 +192,7 @@ enum TrayCommand {
     OpacityRadio(usize),
     SetMirrorChecked(bool),
     SetMonitorChecked(Option<usize>),
+    SetUseConfigChecked(bool),
 }
 
 fn load_tray_ids_and_spawn_gtk(
@@ -176,6 +214,8 @@ fn load_tray_ids_and_spawn_gtk(
             let opacity_items: Vec<CheckMenuItem> = OPACITY_PRESETS.iter().map(|&val| {
                 CheckMenuItem::new(&format!("{:.2}", val), true, false, None)
             }).collect();
+            let use_config = CheckMenuItem::new("Use config.ini", true, false, None);
+            let profile_items: Vec<MenuItem> = profile_names.iter().map(|n| MenuItem::new(n, true, None)).collect();
             let save_current = MenuItem::new("Save Current", true, None);
             let save_new = MenuItem::new("Save As New Profile", true, None);
             let reload_profiles = MenuItem::new("Reload Profiles", true, None);
@@ -199,6 +239,8 @@ fn load_tray_ids_and_spawn_gtk(
                 exit_id: exit_item.id().clone(),
                 mirror_id: mirror_toggle.id().clone(),
                 monitor_ids: monitor_items.iter().map(|i| i.id().clone()).collect(),
+                profile_ids: profile_items.iter().map(|i| i.id().clone()).collect(),
+                use_config_id: use_config.id().clone(),
             };
 
             let menu = Menu::new();
@@ -230,10 +272,12 @@ fn load_tray_ids_and_spawn_gtk(
             menu.append(&PredefinedMenuItem::separator()).unwrap();
 
             let profiles_submenu = Submenu::new("Profiles", true);
-            for (i, name) in profile_names.iter().enumerate() {
-                let item = MenuItem::new(name, true, None);
-                profiles_submenu.insert(&item, i).unwrap();
+            profiles_submenu.append(&use_config).unwrap();
+            profiles_submenu.append(&PredefinedMenuItem::separator()).unwrap();
+            for item in &profile_items {
+                profiles_submenu.append(item).unwrap();
             }
+            profiles_submenu.append(&PredefinedMenuItem::separator()).unwrap();
             profiles_submenu.append(&save_current).unwrap();
             profiles_submenu.append(&save_new).unwrap();
             profiles_submenu.append(&reload_profiles).unwrap();
@@ -266,6 +310,7 @@ fn load_tray_ids_and_spawn_gtk(
                                 item.set_checked(Some(i) == opt);
                             }
                         }
+                        TrayCommand::SetUseConfigChecked(v) => use_config.set_checked(v),
                     }
                 }
                 std::thread::yield_now();
@@ -398,7 +443,8 @@ fn render_overlay(ov: &mut OverlayWindow, cfg: &Config, ctype: CrosshairType) {
     let (rr, gg, bb) = cfg.parse_color();
     let alpha = cfg.opacity;
     let main_color = (rr, gg, bb, alpha);
-    let border_color = (0.0, 0.0, 0.0, 0.5 * alpha);
+    let (br, bg, bb2) = cfg.parse_border_color();
+    let border_color = (br, bg, bb2, alpha);
     let cx = w as f32 / 2.0 + cfg.adjust_x;
     let cy = h as f32 / 2.0 + cfg.adjust_y;
     let scale = 1.0;
@@ -690,6 +736,7 @@ pub fn run() {
         cmd_tx.send(TrayCommand::SetMonitorChecked(Some(config.set_monitor as usize))).ok();
     }
     cmd_tx.send(TrayCommand::SetToggleChecked(true)).ok();
+    cmd_tx.send(TrayCommand::SetUseConfigChecked(true)).ok();
 
     // Request redraw for all overlays initially
     {
@@ -705,10 +752,37 @@ pub fn run() {
     let hk_cfg = config.clone();
     let _hotkey_handle = setup_x11_hotkey(&hk_cfg, hk_proxy);
 
-    let mut last_config_check = Instant::now();
+    let notify_proxy = proxy.clone();
+
+    // Set up file watcher for config.ini
+    // Watch the parent directory, not the file, to survive atomic saves
+    // (editors rename temp → target, changing the inode)
+    let config_dir = exe_dir();
+    let mut watcher: RecommendedWatcher = Watcher::new(
+        move |event: std::result::Result<notify::Event, notify::Error>| {
+            if let Ok(event) = event {
+                let is_config = event.paths.iter().any(|p| p.ends_with("config.ini"));
+                if !is_config { return; }
+                match event.kind {
+                    EventKind::Modify(ModifyKind::Data(_))
+                    | EventKind::Modify(ModifyKind::Name(_))
+                    | EventKind::Create(_) => {
+                        let _ = notify_proxy.send_event(UserEvent::ConfigFileChanged);
+                    }
+                    _ => {}
+                }
+            }
+        },
+        NotifyConfig::default(),
+    ).unwrap();
+    if watcher.watch(&config_dir, RecursiveMode::NonRecursive).is_err() {
+        eprintln!("ZeroIn: failed to watch config directory");
+    }
 
     event_loop.run(move |event, elwt| {
-        elwt.set_control_flow(ControlFlow::Poll);
+        elwt.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + Duration::from_secs(2)
+        ));
 
         // Handle tray menu events
         while let Ok(menu_event) = menu_receiver.try_recv() {
@@ -718,8 +792,7 @@ pub fn run() {
             if id == tray_menu_ids.toggle_id {
                 app.visible = !app.visible;
                 if app.visible {
-                    app.config = Config::load();
-                    app.crosshair_type = app.config.crosshair_type;
+                    app.reload_config();
                     let cfg = app.config.clone();
                     clear_overlay_pngs(&mut app.overlays);
                     reconcile_overlays(&mut app.overlays, &cfg, &monitors, elwt);
@@ -759,6 +832,51 @@ pub fn run() {
                 let current_name = app.profiles.current.and_then(|i| app.profiles.list.get(i)).map(|p| p.name.clone());
                 app.profiles = crate::profiles::Profiles::load();
                 app.profiles.current = current_name.as_ref().and_then(|n| app.profiles.current_index_by_name(n));
+                if let Some(idx) = app.profiles.current {
+                    if let Some(p) = app.profiles.list.get(idx).cloned() {
+                        let config = &mut app.config;
+                        p.apply_to_config(config);
+                    }
+                }
+                app.crosshair_type = app.config.crosshair_type;
+                clear_overlay_pngs(&mut app.overlays);
+                if app.visible {
+                    for ov in &app.overlays {
+                        ov.window.request_redraw();
+                    }
+                }
+                cmd_tx.send(TrayCommand::SetUseConfigChecked(app.profiles.current.is_none())).ok();
+                continue;
+            }
+
+            if id == tray_menu_ids.use_config_id {
+                app.profiles.current = None;
+                app.config = Config::load();
+                app.crosshair_type = app.config.crosshair_type;
+                clear_overlay_pngs(&mut app.overlays);
+                if app.visible {
+                    for ov in &app.overlays {
+                        ov.window.request_redraw();
+                    }
+                }
+                cmd_tx.send(TrayCommand::SetUseConfigChecked(true)).ok();
+                continue;
+            }
+
+            if let Some(pidx) = tray_menu_ids.profile_ids.iter().position(|pid| id == *pid) {
+                app.profiles.current = Some(pidx);
+                if let Some(p) = app.profiles.list.get(pidx).cloned() {
+                    let config = &mut app.config;
+                    p.apply_to_config(config);
+                }
+                app.crosshair_type = app.config.crosshair_type;
+                clear_overlay_pngs(&mut app.overlays);
+                if app.visible {
+                    for ov in &app.overlays {
+                        ov.window.request_redraw();
+                    }
+                }
+                cmd_tx.send(TrayCommand::SetUseConfigChecked(false)).ok();
                 continue;
             }
 
@@ -880,8 +998,7 @@ pub fn run() {
                 let mut app = app.borrow_mut();
                 app.visible = !app.visible;
                 if app.visible {
-                    app.config = Config::load();
-                    app.crosshair_type = app.config.crosshair_type;
+                    app.reload_config();
                     clear_overlay_pngs(&mut app.overlays);
                     show_all(&app.overlays);
                     for ov in &app.overlays {
@@ -892,23 +1009,36 @@ pub fn run() {
                 }
                 cmd_tx.send(TrayCommand::SetToggleChecked(app.visible)).ok();
             }
+            Event::UserEvent(UserEvent::ConfigFileChanged) => {
+                let mut app = app.borrow_mut();
+                let new_mtime = config_mtime();
+                if new_mtime != app.config_mtime {
+                    app.config_mtime = new_mtime;
+                    app.reload_config();
+                    let cfg = app.config.clone();
+                    clear_overlay_pngs(&mut app.overlays);
+                    if app.visible {
+                        reconcile_overlays(&mut app.overlays, &cfg, &monitors, elwt);
+                        for ov in &app.overlays {
+                            ov.window.request_redraw();
+                        }
+                    }
+                }
+            }
             Event::AboutToWait => {
-                let now = Instant::now();
-                if now.duration_since(last_config_check) >= Duration::from_secs(2) {
-                    last_config_check = now;
-                    let mut app = app.borrow_mut();
-                    let new_mtime = config_mtime();
-                    if new_mtime != app.config_mtime {
-                        app.config_mtime = new_mtime;
-                        app.config = Config::load();
-                        app.crosshair_type = app.config.crosshair_type;
-                        let cfg = app.config.clone();
-                        clear_overlay_pngs(&mut app.overlays);
-                        if app.visible {
-                            reconcile_overlays(&mut app.overlays, &cfg, &monitors, elwt);
-                            for ov in &app.overlays {
-                                ov.window.request_redraw();
-                            }
+                // Always check mtime as fallback — survives missed notify events
+                // (atomic saves, NFS, etc.)
+                let mut app = app.borrow_mut();
+                let new_mtime = config_mtime();
+                if new_mtime != app.config_mtime {
+                    app.config_mtime = new_mtime;
+                    app.reload_config();
+                    let cfg = app.config.clone();
+                    clear_overlay_pngs(&mut app.overlays);
+                    if app.visible {
+                        reconcile_overlays(&mut app.overlays, &cfg, &monitors, elwt);
+                        for ov in &app.overlays {
+                            ov.window.request_redraw();
                         }
                     }
                 }

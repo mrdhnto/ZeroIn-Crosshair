@@ -133,6 +133,7 @@ pub struct Config {
     pub thickness_h: f32,
     pub thickness_v: f32,
     pub color_hex: String,
+    pub border_color_hex: String,
     pub dot_center: bool,
     pub opacity: f32,
     pub border: bool,
@@ -158,6 +159,7 @@ impl Default for Config {
             thickness_h: 2.0,
             thickness_v: 2.0,
             color_hex: "#FF0000".into(),
+            border_color_hex: "#000000".into(),
             dot_center: true,
             opacity: 0.85,
             border: true,
@@ -288,6 +290,12 @@ impl Config {
                             }
                             config.border_size = v.max(0.0);
                         }
+                        "border_color" => {
+                            if !value.starts_with('#') || value.len() < 7 {
+                                log_warning(&format!("invalid border_color {value}, using default"));
+                            }
+                            config.border_color_hex = value.to_string();
+                        }
                         "space_width" => {
                             let v = value.parse::<f32>().unwrap_or(0.0).max(0.0);
                             if v < 0.0 {
@@ -367,5 +375,19 @@ impl Config {
             }
         }
         (1.0, 0.0, 0.0)
+    }
+
+    pub fn parse_border_color(&self) -> (f32, f32, f32) {
+        let hex = self.border_color_hex.trim_start_matches('#');
+        if hex.len() >= 6 {
+            if let (Ok(r), Ok(g), Ok(b)) = (
+                u8::from_str_radix(&hex[0..2], 16),
+                u8::from_str_radix(&hex[2..4], 16),
+                u8::from_str_radix(&hex[4..6], 16),
+            ) {
+                return (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+            }
+        }
+        (0.0, 0.0, 0.0)
     }
 }

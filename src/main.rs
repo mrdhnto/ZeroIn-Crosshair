@@ -1,10 +1,10 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-mod canvas;
-mod config;
-mod crosshair;
+pub mod canvas;
+pub mod config;
+pub mod crosshair;
 mod platform;
-mod profiles;
+pub mod profiles;
 
 fn main() {
     platform::run();

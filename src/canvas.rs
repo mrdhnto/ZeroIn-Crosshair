@@ -177,7 +177,7 @@ impl SwCanvas {
 }
 
 #[cfg(target_os = "linux")]
-fn premul_pixel(color: Color) -> u32 {
+pub fn premul_pixel(color: Color) -> u32 {
     let (r, g, b, a) = color;
     let a = a.clamp(0.0, 1.0);
     let pb = (b * a * 255.0).round().min(255.0).max(0.0) as u32;
@@ -188,7 +188,7 @@ fn premul_pixel(color: Color) -> u32 {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn blend_premul(dst: u32, src: u32) -> u32 {
+pub fn blend_premul(dst: u32, src: u32) -> u32 {
     if src >> 24 == 0 { return dst; }
     if src >> 24 == 255 { return src; }
     let sa = (src >> 24) as f32 / 255.0;
@@ -221,7 +221,7 @@ fn lerp_pixel(a: u32, b: u32, t: u32, inv: u32) -> u32 {
 }
 
 #[cfg(target_os = "linux")]
-fn rotate_buffer(src: &[u32], w: u32, h: u32, angle_rad: f32, cx: f32, cy: f32) -> Vec<u32> {
+pub fn rotate_buffer(src: &[u32], w: u32, h: u32, angle_rad: f32, cx: f32, cy: f32) -> Vec<u32> {
     let (sin_a, cos_a) = angle_rad.sin_cos();
     let mut dst = vec![0u32; (w * h) as usize];
     for y in 0..h {

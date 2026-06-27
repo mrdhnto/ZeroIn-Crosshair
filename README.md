@@ -191,11 +191,6 @@ The binary will be at `target/release/ZeroIn`. Place `config.ini` next to it.
 - PNG crosshair decoding via `image` crate
 - `Canvas` trait abstracts drawing primitives — `crosshair.rs` is pure math, no platform deps
 
-## Preview
-
-![ZeroIn crosshair over CS2](screenshots/crosshair-cs2.png)
-![ZeroIn crosshair over Valorant](screenshots/crosshair-valorant.png)
-
 ## Project Status
 
 ZeroIn is in active development. Feature depth (6 crosshair types, PNG support, independent H/V thickness, named profiles, instant fsnotify reload, multi-monitor, per-monitor DPI) already exceeds most alternatives — including linux support. Expect steady improvements until feature-complete, then maintenance-only.
